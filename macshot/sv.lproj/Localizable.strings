@@ -20,6 +20,7 @@
 "Capture OCR" = "OCR-f\U00E5ngst";
 "Quick Capture" = "Snabbf\U00E5ngst";
 "Scroll Capture" = "Rullf\U00E5ngst";
+"Capture Last Area" = "Fånga senaste området";
 "Capture Delay" = "F\U00F6rdr\U00F6jning";
 "None" = "Ingen";
 "%d seconds" = "%d sekunder";
@@ -183,12 +184,12 @@
 "Capture" = "F\U00E5ngst";
 "Play sound on capture" = "Spela ljud vid skärmdump";
 "Play sound on copy" = "Spela ljud vid kopiering";
-"Remember last selection area" = "Kom ih\U00E5g senaste markeringsomr\U00E5de";
 "Remember last selected tool" = "Kom ih\U00E5g senast valt verktyg";
 "Show floating thumbnail after capture" = "Visa flytande miniatyrbild efter f\U00E5ngst";
 "Launch at login" = "Starta vid inloggning";
 "Show snap alignment guides" = "Visa f\U00E4stlinjer";
 "Capture mouse cursor in screenshot" = "F\U00E5nga muspekaren i sk\U00E4rmbild";
+"Double-click selection to copy" = "Dubbelklicka p\U00E5 markeringen f\U00F6r att kopiera";
 "Use window title in saved filename" = "Anv\U00E4nd f\U00F6nstertitel i filnamn";
 "Hide menu bar icon" = "D\U00F6lj menyradsikon";
 "Hotkeys still work. To show the icon again, re-launch macshot." = "Kortkommandon fungerar fortfarande. F\U00F6r att visa ikonen igen, starta om macshot.";
@@ -239,6 +240,10 @@
 "Annotation Tools" = "Anteckningsverktyg";
 "Hidden tools are removed from the bottom toolbar." = "Dolda verktyg tas bort fr\U00E5n det nedre verktygsf\U00E4ltet.";
 "Capture Actions" = "F\U00E5ngst\U00E5tg\U00E4rder";
+"Menu Bar Order" = "Menyradens ordning";
+"Choose the order of capture actions in the macshot menu bar menu." = "V\U00E4lj ordningen p\U00E5 f\U00E5ngst\U00E5tg\U00E4rderna i menyn p\U00E5 macshot-menyraden.";
+"Move up" = "Flytta upp";
+"Move down" = "Flytta ned";
 "Bottom Toolbar Actions" = "\U00C5tg\U00E4rder i nedre verktygsf\U00E4ltet";
 "Hidden actions are removed from the bottom toolbar." = "Dolda \U00E5tg\U00E4rder tas bort fr\U00E5n det nedre verktygsf\U00E4ltet.";
 "Editor Actions" = "Redigerings\U00E5tg\U00E4rder";
@@ -249,6 +254,7 @@
 "Frame rate:" = "Bildfrekvens:";
 "After recording:" = "Efter inspelning:";
 "Save recording to:" = "Spara inspelning till:";
+"Save Recording" = "Spara inspelning";
 "Clear" = "Rensa";
 "Max height:" = "Maxh\U00F6jd:";
 "px (0 = unlimited)" = "px (0 = obegr\U00E4nsat)";
@@ -342,7 +348,7 @@
 "Text Recognition" = "Textigenk\U00E4nning";
 "Translate to:" = "\U00D6vers\U00E4tt till:";
 "%d chars \U00B7 %d words" = "%d tecken \U00B7 %d ord";
-"Copy  \u2318\u21A9" = "Kopiera  \u2318\u21A9";
+"Copy  \U2318\U21A9" = "Kopiera  \U2318\U21A9";
 "AI Search" = "AI-s\U00F6kning";
 "Show Original" = "Visa original";
 "Translation Failed" = "\U00D6vers\U00E4ttning misslyckades";
@@ -359,7 +365,7 @@
 
 /* Recording Toast */
 "Recording saved" = "Inspelning sparad";
-"%@ \u2022 Recording saved" = "%@ \u2022 Inspelning sparad";
+"%@ \U2022 Recording saved" = "%@ \U2022 Inspelning sparad";
 "Copy Path" = "Kopiera s\U00F6kv\U00E4g";
 "Path copied!" = "S\U00F6kv\U00E4g kopierad!";
 
@@ -402,7 +408,7 @@
 "History" = "Historik";
 
 /* Preferences - Shortcuts note */
-"Click \"Record\" and press a key combination with at least one modifier (\u2318, \u2325, \u2303, \u21E7) to set a shortcut." = "Klicka p\U00E5 \"Record\" och tryck p\U00E5 en tangentkombination med minst en modifierare (\u2318, \u2325, \u2303, \u21E7) f\U00F6r att st\U00E4lla in en genv\U00E4g.";
+"Click \"Record\" and press a key combination with at least one modifier (\U2318, \U2325, \U2303, \U21E7) to set a shortcut." = "Klicka p\U00E5 \"Record\" och tryck p\U00E5 en tangentkombination med minst en modifierare (\U2318, \U2325, \U2303, \U21E7) f\U00F6r att st\U00E4lla in en genv\U00E4g.";
 
 /* Recording \U2014 GIF Processing */
 "Processing GIF\U2026" = "Bearbetar GIF\U2026";
@@ -434,11 +440,16 @@
 "Top Left" = "\U00D6vre v\U00E4nster";
 "Small" = "Liten";
 "Large" = "Stor";
+"Webcam Size Small" = "Liten";
+"Webcam Size Medium" = "Medel";
+"Webcam Size Large" = "Stor";
+"Webcam Size Extra Large" = "Extra stor";
 "Circle" = "Cirkel";
 "Rounded Rectangle" = "Rundad rektangel";
 "Cam pos:" = "Kam. pos.:";
 "Cam size:" = "Kam. storlek:";
 "Cam shape:" = "Kam. form:";
+"  Position:" = "  Position:";
 
 /* New Strings */
 "Settings..." = "Inst\U00E4llningar...";
@@ -497,3 +508,84 @@
 "Files are uploaded to a \"macshot\" folder in your Google Drive. Everything stays private — nothing is shared publicly." = "Filer laddas upp till en \"macshot\"-mapp i din Google Drive. Allt förblir privat — inget delas offentligt.";
 
 "Pressure" = "Tryck";
+
+/* Added for v4.1.0-beta.3 — video editor, effects, open-video, shortcuts help */
+"Open Video..." = "Öppna video...";
+"Choose a video to open in macshot editor" = "Välj en video att öppna i macshot-redigeraren";
+"Click to add effects" = "Klicka för att lägga till effekter";
+"Add Zoom" = "Lägg till zoom";
+"Add Censor" = "Lägg till censur";
+"Add Cut" = "Lägg till klipp";
+"Add Speed" = "Lägg till hastighet";
+"Add Freeze" = "Lägg till frysning";
+"Add Text" = "Lägg till text";
+"Delete Zoom" = "Ta bort zoom";
+"Delete Censor" = "Ta bort censur";
+"Delete Cut" = "Ta bort klipp";
+"Delete Speed" = "Ta bort hastighet";
+"Delete Freeze" = "Ta bort frysning";
+"Delete Text" = "Ta bort text";
+"Edit Text…" = "Redigera text…";
+"Huge" = "Enorm";
+"Bold" = "Fet";
+"Italic" = "Kursiv";
+"Alignment" = "Justering";
+"Left" = "Vänster";
+"Center" = "Centrerad";
+"Right" = "Höger";
+"Text Color" = "Textfärg";
+"Background Color" = "Bakgrundsfärg";
+"Rounded" = "Rundad";
+"Custom…" = "Anpassad…";
+"Transparent" = "Genomskinlig";
+"Black" = "Svart";
+"White" = "Vit";
+"Yellow" = "Gul";
+"Red" = "Röd";
+"Green" = "Grön";
+"Blue" = "Blå";
+"Untitled" = "Namnlös";
+"Add effect" = "Lägg till effekt";
+"Fade" = "Toning";
+"High" = "Hög";
+"Low" = "Låg";
+"Not enough room here" = "Inte tillräckligt med plats här";
+"Copied!" = "Kopierat!";
+"Converting to GIF…" = "Konverterar till GIF…";
+"GIF conversion failed" = "GIF-konvertering misslyckades";
+"No video track found" = "Inget videospår hittades";
+"Preview:" = "Förhandsvisning:";
+"Copy Screen Info" = "Kopiera skärminfo";
+"Copies display and capture diagnostics to clipboard" = "Kopierar skärm- och fångstdiagnostik till urklipp";
+"Accent" = "Accent";
+"Icon" = "Ikon";
+"Background" = "Bakgrund";
+"Custom" = "Anpassad";
+"Theme:" = "Tema:";
+"Application" = "Applikation";
+"Capture area and extract text" = "Fånga område och extrahera text";
+"Capture the full screen" = "Fånga hela skärmen";
+"Counter for multi-screen captures" = "Räknare för fångster över flera skärmar";
+"8-character random string (e.g. k3j7x9q2)" = "8-teckens slumpmässig sträng (t.ex. k3j7x9q2)";
+"Filename Template Tokens" = "Filnamnsmalltoken";
+"Filename tokens" = "Filnamnstoken";
+"Filename:" = "Filnamn:";
+"Open an image file in the editor" = "Öppna en bildfil i redigeraren";
+"Open the recent captures overlay" = "Öppna överlagringen för senaste fångster";
+"Open this settings window" = "Öppna detta inställningsfönster";
+"Quick capture (uses your Enter action)" = "Snabbfångst (använder din Enter-åtgärd)";
+"Re-capture the last selected area" = "Fånga det senast markerade området igen";
+"Screenshots only — captured window title (blank otherwise)" = "Endast skärmbilder — fångad fönstertitel (tomt annars)";
+"Show available filename tokens" = "Visa tillgängliga filnamnstoken";
+"Show supported URL scheme commands" = "Visa kommandon som stöds av URL-schemat";
+"Start area capture" = "Starta områdesfångst";
+"Start area recording" = "Starta områdesinspelning";
+"Start full-screen recording" = "Starta helskärmsinspelning";
+"Start scroll capture" = "Starta rullfångst";
+"Stop the current recording" = "Stoppa aktuell inspelning";
+"Supported URL Scheme Commands" = "Kommandon som stöds av URL-schemat";
+"The file extension is appended automatically. Slashes and colons in {window} become dashes." = "Filändelsen läggs till automatiskt. Snedstreck och kolon i {window} blir bindestreck.";
+"Trigger macshot from Raycast, Alfred, Shortcuts, or any tool that opens URLs." = "Utlös macshot från Raycast, Alfred, Shortcuts eller valfritt verktyg som öppnar URL:er.";
+"URL scheme info" = "URL-scheminfo";
+"Enable macshot:// URL scheme" = "Aktivera macshot://-URL-schema";
+"sec (0 = never)" = "sek (0 = aldrig)";

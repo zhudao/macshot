@@ -170,6 +170,14 @@ final class RecordingEngine: NSObject {
             config.sourceRect = cropRect
             config.pixelFormat = kCVPixelFormatType_32BGRA
             config.scalesToFit = false
+            // Force sRGB at capture time. Without this ScreenCaptureKit delivers
+            // frames in the display's native color space (often Display P3),
+            // but AVAssetWriter tags the file as bt709 below — a mismatch that
+            // makes AVPlayer render back the video with washed-out colors on
+            // P3 displays.
+            if #available(macOS 14.0, *) {
+                config.colorSpaceName = CGColorSpace.sRGB
+            }
 
             // System audio capture (off by default, macOS 13+)
             if #available(macOS 13.0, *) {
@@ -331,20 +339,12 @@ final class RecordingEngine: NSObject {
     private func setupAssetWriter(url: URL, width: Int, height: Int) throws {
         let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
 
-        let settings: [String: Any] = [
-            AVVideoCodecKey: AVVideoCodecType.h264,
-            AVVideoWidthKey: width,
-            AVVideoHeightKey: height,
-            AVVideoColorPropertiesKey: [
-                AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
-                AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
-                AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2,
-            ],
-            AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: width * height * fps / 8,
-                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
-            ]
-        ]
+        // Record at the highest tier — export re-encodes if the user picks a
+        // smaller preset. Losing bits at record time is irreversible.
+        let settings = VideoEncodingSettings.outputSettings(
+            width: width, height: height, fps: fps,
+            codec: .h264, quality: .high
+        )
 
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
         input.expectsMediaDataInRealTime = true
@@ -461,8 +461,9 @@ final class RecordingEngine: NSObject {
         // Save to temp directory — always writable in sandbox.
         // The video editor handles final export to the user's chosen location.
         let dir = FileManager.default.temporaryDirectory
-        let name = "Recording \(OverlayWindowController.formattedTimestamp()).mp4"
-        return dir.appendingPathComponent(name)
+        let template = UserDefaults.standard.string(forKey: FilenameFormatter.recordingUserDefaultsKey) ?? FilenameFormatter.defaultRecordingTemplate
+        let base = FilenameFormatter.format(template: template, fallback: FilenameFormatter.defaultRecordingTemplate)
+        return dir.appendingPathComponent("\(base).mp4")
     }
 
     // MARK: - Helpers

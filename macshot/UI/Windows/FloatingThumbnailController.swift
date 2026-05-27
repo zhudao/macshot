@@ -1,5 +1,20 @@
 import Cocoa
 
+enum FloatingThumbnailCorner: String {
+    case bottomRight
+    case bottomLeft
+    case topRight
+    case topLeft
+
+    var isLeft: Bool {
+        self == .bottomLeft || self == .topLeft
+    }
+
+    var isTop: Bool {
+        self == .topLeft || self == .topRight
+    }
+}
+
 @MainActor
 class FloatingThumbnailController: NSObject, NSDraggingSource {
 
@@ -7,6 +22,7 @@ class FloatingThumbnailController: NSObject, NSDraggingSource {
     private var dismissTask: DispatchWorkItem?
     private(set) var image: NSImage
     private var thumbnailView: ThumbnailView?
+    private var corner: FloatingThumbnailCorner = .bottomRight
     /// History entry ID — used to match and update the thumbnail when the editor saves.
     var historyEntryID: String?
     /// The intended final frame — used instead of window.frame to avoid reading
@@ -20,6 +36,7 @@ class FloatingThumbnailController: NSObject, NSDraggingSource {
     var onPin:      (() -> Void)?
     var onEdit:     (() -> Void)?
     var onUpload:   (() -> Void)?
+    var onDelete:   (() -> Void)?
     var onCloseAll: (() -> Void)?
     var onSaveAll:  (() -> Void)?
 
@@ -28,9 +45,15 @@ class FloatingThumbnailController: NSObject, NSDraggingSource {
         super.init()
     }
 
+    static func currentThumbnailSize() -> NSSize {
+        let scale = CGFloat(UserDefaults.standard.object(forKey: "thumbnailScale") as? Double ?? 1.0)
+        return NSSize(width: round(240 * scale), height: round(160 * scale))
+    }
+
     // MARK: - Show
 
-    func show(atY y: CGFloat) {
+    func show(at origin: NSPoint, corner: FloatingThumbnailCorner) {
+        self.corner = corner
         let screen = NSScreen.main ?? NSScreen.screens[0]
         let screenFrame = screen.visibleFrame
 
@@ -40,15 +63,15 @@ class FloatingThumbnailController: NSObject, NSDraggingSource {
         guard image.size.width > 0 && image.size.height > 0 else { return }
 
         // Fixed thumbnail size scaled by user preference (default 1.0 = 240x160)
-        let scale = CGFloat(UserDefaults.standard.object(forKey: "thumbnailScale") as? Double ?? 1.0)
-        let thumbSize = NSSize(width: round(240 * scale), height: round(160 * scale))
+        let thumbSize = Self.currentThumbnailSize()
 
-        // Clamp Y so the thumbnail always fits within the visible screen
-        let clampedY = min(y, screenFrame.maxY - thumbSize.height - padding)
+        // Clamp so the thumbnail always fits within the visible screen.
+        let clampedX = min(origin.x, screenFrame.maxX - thumbSize.width - padding)
+        let finalX = max(screenFrame.minX + padding, clampedX)
+        let clampedY = min(origin.y, screenFrame.maxY - thumbSize.height - padding)
         let finalY   = max(screenFrame.minY + padding, clampedY)
 
-        let finalX = screenFrame.maxX - thumbSize.width - padding
-        let startX = screenFrame.maxX + 10
+        let startX = corner.isLeft ? screenFrame.minX - thumbSize.width - 10 : screenFrame.maxX + 10
 
         let panel = NSPanel(
             contentRect: NSRect(x: startX, y: finalY, width: thumbSize.width, height: thumbSize.height),
@@ -76,6 +99,7 @@ class FloatingThumbnailController: NSObject, NSDraggingSource {
         view.onPin      = { [weak self] in self?.onPin?();      self?.dismiss() }
         view.onEdit     = { [weak self] in self?.onEdit?();     self?.dismiss() }
         view.onUpload   = { [weak self] in self?.onUpload?();   self?.dismiss() }
+        view.onDelete   = { [weak self] in self?.onDelete?();   self?.dismiss() }
         view.onCloseAll = { [weak self] in self?.onCloseAll?() }
         view.onSaveAll  = { [weak self] in self?.onSaveAll?() }
         view.onHoverEnter = { [weak self] in self?.pauseAutoDismiss() }
@@ -143,10 +167,10 @@ class FloatingThumbnailController: NSObject, NSDraggingSource {
     }
 
     /// Animate this thumbnail to a new Y position (used when a lower thumbnail is dismissed).
-    func moveTo(y: CGFloat) {
+    func moveTo(origin: NSPoint) {
         guard let window = window else { return }
-        guard targetFrame.minY != y else { return }
-        let newFrame = NSRect(x: targetFrame.minX, y: y, width: targetFrame.width, height: targetFrame.height)
+        guard targetFrame.origin != origin else { return }
+        let newFrame = NSRect(x: origin.x, y: origin.y, width: targetFrame.width, height: targetFrame.height)
         targetFrame = newFrame
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.25
@@ -159,7 +183,7 @@ class FloatingThumbnailController: NSObject, NSDraggingSource {
         guard let window = window else { return }
         let frame = window.frame
         let screen = NSScreen.main ?? NSScreen.screens[0]
-        let offscreenX = screen.visibleFrame.maxX + 10
+        let offscreenX = corner.isLeft ? screen.visibleFrame.minX - frame.width - 10 : screen.visibleFrame.maxX + 10
 
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.4
@@ -180,8 +204,7 @@ class FloatingThumbnailController: NSObject, NSDraggingSource {
         guard let view = thumbnailView else { return }
         guard let encodedData = ImageEncoder.encode(image) else { return }
 
-        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("macshot_\(OverlayWindowController.formattedTimestamp()).\(ImageEncoder.fileExtension)")
+        let tempURL = TmpScratchDirectory.makeURL(filename: FilenameFormatter.defaultImageFilename())
         do { try encodedData.write(to: tempURL) } catch { return }
 
         let draggingItem = NSDraggingItem(pasteboardWriter: tempURL as NSURL)
@@ -205,6 +228,7 @@ private class ThumbnailView: NSView {
     var onPin:      (() -> Void)?
     var onEdit:     (() -> Void)?
     var onUpload:   (() -> Void)?
+    var onDelete:   (() -> Void)?
     var onCloseAll: (() -> Void)?
     var onSaveAll:  (() -> Void)?
     var onHoverEnter: (() -> Void)?
@@ -226,9 +250,15 @@ private class ThumbnailView: NSView {
 
     private var hoveredRect: NSRect = .zero
 
-    private let cornerR: CGFloat = 28   // corner button circle radius
-    private let centerBtnW: CGFloat = 110
-    private let centerBtnH: CGFloat = 32
+    private var controlScale: CGFloat {
+        guard thumbSize.width > 0, thumbSize.height > 0 else { return 1 }
+        let baseScale = min(bounds.width / 240, bounds.height / 160)
+        return min(max(baseScale, 0.55), 2.0)
+    }
+
+    private func scaled(_ value: CGFloat, minimum: CGFloat = 0) -> CGFloat {
+        max(minimum, round(value * controlScale))
+    }
 
     init(image: NSImage, thumbSize: NSSize) {
         self.image = image
@@ -331,19 +361,20 @@ private class ThumbnailView: NSView {
         NSColor.black.withAlphaComponent(0.45).setFill()
         NSBezierPath(roundedRect: r, xRadius: cr, yRadius: cr).fill()
 
-        let pad: CGFloat = 10   // distance from corner to circle center
+        let pad = scaled(10, minimum: 5)
+        let cornerD = scaled(28, minimum: 18)
 
         // Corner button definitions: (center, symbol, keyPath to write rect)
         let cornerDefs: [(NSPoint, String)] = [
-            (NSPoint(x: r.minX + pad + cornerR/2, y: r.maxY - pad - cornerR/2), "xmark"),
-            (NSPoint(x: r.maxX - pad - cornerR/2, y: r.maxY - pad - cornerR/2), "pin.fill"),
-            (NSPoint(x: r.minX + pad + cornerR/2, y: r.minY + pad + cornerR/2), "pencil"),
-            (NSPoint(x: r.maxX - pad - cornerR/2, y: r.minY + pad + cornerR/2), "icloud.and.arrow.up"),
+            (NSPoint(x: r.minX + pad + cornerD/2, y: r.maxY - pad - cornerD/2), "xmark"),
+            (NSPoint(x: r.maxX - pad - cornerD/2, y: r.maxY - pad - cornerD/2), "pin.fill"),
+            (NSPoint(x: r.minX + pad + cornerD/2, y: r.minY + pad + cornerD/2), "pencil"),
+            (NSPoint(x: r.maxX - pad - cornerD/2, y: r.minY + pad + cornerD/2), "icloud.and.arrow.up"),
         ]
 
         var cornerRects: [NSRect] = []
         for (center, symbol) in cornerDefs {
-            let circleRect = NSRect(x: center.x - cornerR/2, y: center.y - cornerR/2, width: cornerR, height: cornerR)
+            let circleRect = NSRect(x: center.x - cornerD/2, y: center.y - cornerD/2, width: cornerD, height: cornerD)
             cornerRects.append(circleRect)
             let isHit = circleRect == hoveredRect
 
@@ -355,10 +386,11 @@ private class ThumbnailView: NSView {
             circlePath.stroke()
 
             if let sym = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) {
-                let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
+                let cfg = NSImage.SymbolConfiguration(pointSize: scaled(11, minimum: 8), weight: .semibold)
                 let colored = sym.withSymbolConfiguration(cfg) ?? sym
                 let tinted = tintedWhite(colored)
-                let iconSize = NSSize(width: 13, height: 13)
+                let iconSide = scaled(13, minimum: 9)
+                let iconSize = NSSize(width: iconSide, height: iconSide)
                 let iconRect = NSRect(x: center.x - iconSize.width/2, y: center.y - iconSize.height/2,
                                      width: iconSize.width, height: iconSize.height)
                 tinted.draw(in: iconRect, from: NSRect.zero, operation: .sourceOver, fraction: 1.0)
@@ -372,10 +404,22 @@ private class ThumbnailView: NSView {
         }
 
         // Center action buttons: Copy + Save
-        let totalH = centerBtnH * 2 + 8
+        let centerBtnH = scaled(32, minimum: 18)
+        let centerGap = scaled(8, minimum: 4)
+        let fontSize = scaled(13, minimum: 9)
+        let titleFont = NSFont.systemFont(ofSize: fontSize, weight: .medium)
+        let titleAttrs: [NSAttributedString.Key: Any] = [.font: titleFont]
+        let maxTitleW = max(
+            (L("Copy") as NSString).size(withAttributes: titleAttrs).width,
+            (L("Save") as NSString).size(withAttributes: titleAttrs).width
+        )
+        let horizontalTextPadding = scaled(32, minimum: 18)
+        let preferredCenterW = max(scaled(110, minimum: 64), ceil(maxTitleW + horizontalTextPadding))
+        let centerBtnW = min(r.width - pad * 2, preferredCenterW)
+        let totalH = centerBtnH * 2 + centerGap
         let btnsY = r.midY - totalH/2
 
-        let copyRect = NSRect(x: r.midX - centerBtnW/2, y: btnsY + centerBtnH + 8, width: centerBtnW, height: centerBtnH)
+        let copyRect = NSRect(x: r.midX - centerBtnW/2, y: btnsY + centerBtnH + centerGap, width: centerBtnW, height: centerBtnH)
         let saveRect = NSRect(x: r.midX - centerBtnW/2, y: btnsY,                  width: centerBtnW, height: centerBtnH)
         copyBtnRect = copyRect
         saveBtnRect = saveRect
@@ -391,7 +435,7 @@ private class ThumbnailView: NSView {
             bg.fill()
 
             let attrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 13, weight: .medium),
+                .font: titleFont,
                 .foregroundColor: isHit ? NSColor.black : NSColor(white: 0.1, alpha: 1),
             ]
             let str = title as NSString
@@ -443,6 +487,10 @@ private class ThumbnailView: NSView {
 
     override func rightMouseDown(with event: NSEvent) {
         let menu = NSMenu()
+        let deleteItem = NSMenuItem(title: L("Delete"), action: #selector(deleteAction), keyEquivalent: "\u{8}")
+        deleteItem.target = self
+        menu.addItem(deleteItem)
+        menu.addItem(NSMenuItem.separator())
         let closeAll = NSMenuItem(title: L("Close All"), action: #selector(closeAllAction), keyEquivalent: "")
         closeAll.target = self
         let saveAll = NSMenuItem(title: L("Save All to Folder…"), action: #selector(saveAllAction), keyEquivalent: "")
@@ -452,6 +500,7 @@ private class ThumbnailView: NSView {
         NSMenu.popUpContextMenu(menu, with: event, for: self)
     }
 
+    @objc private func deleteAction()   { onDelete?() }
     @objc private func closeAllAction() { onCloseAll?() }
     @objc private func saveAllAction()  { onSaveAll?() }
 }

@@ -145,7 +145,7 @@ private class PinPanel: NSPanel {
 
     // Don't let Cmd+Q propagate to the app — just close the pin
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "q" {
+        if event.modifierFlags.contains(.command) && event.keyCode == 12 {  // Q
             (contentView as? PinView)?.onClose?()
             return true
         }
@@ -313,14 +313,13 @@ private class PinView: NSView {
 
         let savePanel = NSSavePanel()
         savePanel.allowedContentTypes = [ImageEncoder.utType]
-        savePanel.nameFieldStringValue = "macshot_\(OverlayWindowController.formattedTimestamp()).\(ImageEncoder.fileExtension)"
+        savePanel.nameFieldStringValue = FilenameFormatter.defaultImageFilename()
 
         savePanel.directoryURL = SaveDirectoryAccess.directoryHint()
 
         savePanel.begin { response in
             if response == .OK, let url = savePanel.url {
                 try? imageData.write(to: url)
-                SaveDirectoryAccess.save(url: url.deletingLastPathComponent())
             }
         }
     }

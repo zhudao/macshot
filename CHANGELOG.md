@@ -1,34 +1,354 @@
 # Changelog
 
-## [4.0.4-beta.2] - 2026-04-11
+## [4.1.1] - 2026-05-21
+
+### Added
+
+- **Sketchy arrow style** — hand-drawn-looking arrow option in the arrow style picker.
+- **Double-click selection to copy** — double-click inside the selection to copy the screenshot. On by default; togglable in Settings → General.
+- **Extra Large webcam size** — XL added next to Small/Medium/Large (#199).
+- **Capture menu ordering** — reorder the actions in the menu bar menu from Settings.
+
+### Changed
+
+- **Faster cold-start captures** — the overlay shows up promptly and accepts the first drag without lag, even after a long idle.
+
+### Fixed
+
+- **Scroll capture** — the HUD has been hidden behind the overlay since v3.4.5 and the overlay was eating scroll events. Both fixed.
+- **Save As no longer hijacks the default screenshots folder** — a one-off Save As destination used to replace the configured default. It's now a one-time choice (#168).
+- **Webcam preview during recording setup** — the live webcam panel now appears in the right corner of the selection before you press record, not only after.
+- **Phantom "Screen Recording" notifications** — beta.1's background prewarm triggered the macOS Sequoia indicator every 20 seconds. The prewarm is gone; macshot only reads the screen when you trigger a capture.
+- **Transient UI capture** — hotkey captures preserve disappearing UI such as Raycast, Alfred, app menus, and the Apple menu.
+- **Focus returns to the previous app** after confirming or cancelling a capture.
+- **Floating thumbnails no longer leak into the next capture.**
+- **Preview Save panel** — Save now brings its dialog to the front on the first click.
+- **Copy and Pin no longer replay the capture sound.**
+- **OCR fallback** — if accurate recognition fails, macshot retries with fast recognition.
+- **Video editor text** — double-click editing keeps alignment and background styling stable.
+
+## [4.1.1-beta.4] - 2026-05-20
+
+### Added
+
+- **Sketchy arrow style** — a new hand-drawn-looking arrow option in the arrow style picker, rendered from a real hand-drawn SVG so it actually looks handmade.
+
+### Fixed
+
+- **Scroll capture** — the HUD has been hidden behind the overlay since v3.4.5 and the overlay was capturing scroll events instead of passing them through, making scroll capture unusable. Both fixed.
+- **Save As no longer hijacks the default screenshots folder** — picking a one-off location with Save As used to permanently replace the configured default. It is now treated as a one-time choice; the default is only changed from Settings. (Reported in #168.)
+- **Cold-start hotkey lag** — fixed in two layers: macshot now disables App Nap so it stays responsive after long idle, and the overlay window is now a persistent per-screen NSPanel so WindowServer's composition cache stays warm across captures.
+
+## [4.1.1-beta.3] - 2026-05-17
+
+### Fixed
+
+- **Phantom "Macshot: Screen Recording" notifications** — the periodic capture-path prewarm introduced in 4.1.1-beta.1 was triggering the macOS Sequoia Screen Recording usage indicator every 20 seconds even when no capture was active. The prewarm has been removed; macshot now only reads the screen when you actually trigger a capture.
+
+### Changed
+
+- **Capture pipeline simplification** — window creation and screenshot capture now run in parallel from the hotkey, replacing the layered cold-start workarounds added in earlier 4.1.1 betas. Cold-start latency is improved without any background work between captures.
+
+## [4.1.1-beta.2] - 2026-05-14
+
+### Changed
+
+- **Hotkey capture overlay startup** — global-hotkey captures now show an interactive overlay immediately, even after a cold launch or several idle minutes.
+- **Immediate capture rendering** — the overlay can accept selection input before the full preview surface finishes installing, while still using the full-resolution screenshot for copy, save, editor, and upload output.
+
+### Fixed
+
+- **First drag delay after hotkey capture** — added an early mouse-input path for the capture overlay so macOS/AppKit input lag after Carbon hotkeys no longer blocks starting the selection.
+- **Spinner/old cursor during capture startup** — the capture cursor is now asserted while the overlay is coming up.
+
+## [4.1.1-beta.1] - 2026-05-13
+
+### Added
+
+- **Capture menu ordering** — reorder the capture actions shown in the menu bar menu from Settings.
+- **Missing webcam size localization keys** — added the camera overlay size string to all bundled languages.
+
+### Changed
+
+- **Faster cold screenshot overlay** — pre-capture the screen before activation, keep the WindowServer capture path warm while idle, and avoid blocking the overlay on full redraw work.
+- **Preview actions scale with preview size** — Copy and Save controls now resize with the screenshot preview size setting.
+
+### Fixed
+
+- **Transient UI capture** — hotkey captures now preserve disappearing UI such as Raycast, Alfred, app menus, and the Apple menu.
+- **Previous app focus restore** — completing or cancelling a capture returns focus to the app that was active before macshot opened the overlay.
+- **Floating thumbnails no longer leak into the next capture** while preserving fast capture startup.
+- **Preview Save panel activation** — Save now brings its dialog to the front on the first click.
+- **Preview Copy and Pin sounds** — these actions no longer replay the capture sound.
+- **Video text editing style** — double-click editing keeps alignment and background styling stable instead of switching to an ugly editing style.
+- **OCR fallback** — if accurate recognition fails, macshot retries quickly with fast recognition.
+
+## [4.1.0] - 2026-05-08
+
+The big release in 4.1.0 is a full **video editor effects suite**: zoom, censor, cut, speed, freeze, and text segments rendered through a custom Core Image compositor. Recording quality, color reproduction across external monitors, and capture-flow ergonomics also got significant attention.
+
+### Added
+
+- **Video editor effects suite** — six segment types you can stack on the timeline:
+    - **Zoom** segments with direct-manipulation rect on the preview, fade in/out, 1.2×–5× range.
+    - **Censor** segments — solid / pixelate / blur a rectangular region for a time range. Two censors can overlap.
+    - **Cut** segments — physically remove a range of frames from the export.
+    - **Speed** segments — retime a range at 0.25×–10×, audio stays in sync.
+    - **Freeze** segments — hold a single source frame for a chosen duration.
+    - **Text** segments — overlay styled text (size, bold/italic, color, background pill, alignment, fade) anywhere on the video, with double-click to edit in place.
+- **Multi-row effects band** — overlapping segments stack into separate rows; up to 4 rows visible, scrolls vertically beyond that.
+- **Custom video compositor** — single Core Image render path shared by live preview, MP4 export, and GIF export. Smooth motion, filter-based effects (blur/pixelate) alongside transform-based zoom.
+- **Video export quality presets** (Low / Medium / High) and **export dimensions dropdown** (Original, 75%, 50%, 33%, 25%) with estimated output size.
+- **Right-click to anchor capture rect** — right-click an empty overlay to start a selection, then move the cursor without holding any button.
+- **Capture Last Area** — re-capture the previous selection on demand from the menu bar, hotkey, or `macshot://capture-last`.
+- **URL scheme for external tools** — `macshot://capture`, `macshot://ocr`, `macshot://record`, etc. Trigger from Raycast, Alfred, BetterTouchTool, Shortcuts.
+- **Customizable toolbar background color** with adaptive light/dark appearance.
+- **`{random}` filename token** — 8-character base36 string per file in screenshot/recording filename templates.
+- **Per-glyph Stroke control** for the text tool, alongside Fill and Outline.
+- **11 new configurable overlay shortcuts** — Pin (defaults to F), Upload (U), Copy, Save, OCR, Scroll Capture, Beautify, Invert Colors, Remove Background, Translate, Undo, Redo. Configurable in Settings → Shortcuts.
+- **Keyboard navigation in the history overlay** — arrows, Enter/Cmd+C to copy, Cmd+E to open in editor, Space for Quick Look, Delete to remove.
+- **Dock right-click shows each window individually** — editor, video editor, and preferences windows each appear as their own menu item.
+- **"Open Video…" menu entry** — open a user-owned video in the editor for trimming, effects, and export without touching the source.
+- **Copy Screen Info** in Settings → About — copies display and capture diagnostics for bug reports.
+- **DMG drag-to-install layout** with arrow background, plus a "Move to Applications" prompt when launched from a translocated path.
+
+### Changed
+
+- **Recording bitrate increased** so screen content stays crisp. New tiers target ~12 / ~22 / ~40 Mbit/s at 1440p30 for low/medium/high. B-frames disabled (standard tuning for screen content). Closes #140.
+- **Recording color space** is now forced to sRGB at capture time (macOS 14+), fixing washed-out playback on Display P3 screens.
+- **Faster first capture** — Core Animation/Metal pipeline pre-warmed at app launch; ScreenCaptureKit content cache no longer bypassed on every capture; instant transparent overlay while screenshots load in the background.
+- **Background windows no longer jump forward when triggering a capture** — editor/preferences/Sparkle windows stay behind the user's frontmost app.
+- **Clicking a history entry shows the floating thumbnail** for visual confirmation, instead of silently copying with no feedback. Closes #133.
+- **Sparkle update check interval reduced from 30 minutes to 24 hours** so update prompts don't reappear constantly during release windows.
+
+### Fixed
+
+- **Wrong colors on external monitors** (editor + saved files) — captured screenshots are now normalized to sRGB at capture time. Some external monitors (e.g. ViewSonic VX4380) have ICC profiles that don't round-trip correctly through AppKit's rendering pipeline.
+- **Editor fits large images to the window on open.** Multi-megapixel images (e.g. 24MP photos via Photos.app "Edit in macshot") previously showed only the top-left corner. Closes #161.
+- **Clicking outside the selection no longer wipes annotation progress.** A recurring source of lost work — outside clicks are now a no-op when a selection already exists; ESC still cancels deliberately. Closes #154.
+- **Stroke width, line style, arrow style, shape fill, corner radius, and arrow Flip now persist globally** even when an annotation is selected. Refs #58.
+- **Tmp-file accumulation** — clipboard intermediates, share-sheet temps, cancelled recordings, and sandbox quarantine stubs all accumulated indefinitely. A new launch-time sweep keeps tmp at a few hundred KB steady state (was up to 1.2 GB). Closes #128.
+- **Settings window clipping** in Polish, German, Dutch, and other long-string locales. Closes #130.
+- **GIF export crash on longer recordings**, **GIF export freezes the UI**, and **GIF export shows no progress** — switched to a real background thread, fixed a use-after-free in finalize, added a percentage indicator.
+- **S3 and Google Drive image uploads ignored the filename template** — both now read the same `filenameTemplate` UserDefault that local saves use. Closes #147.
+- **Last used tool not persisted across app restarts** — selected annotation tool now survives via UserDefaults.
+- **Focus not returning to previous app** after capture, and **window snap highlight race condition** on the pre-screenshot transparent overlay.
+- **Color dithering in pinned images and editor window** — disabled `AutomaticAppKit` layer content format in favor of explicit `RGBA8` for pixel-perfect color reproduction.
+
+## [4.1.0-beta.8] - 2026-05-03
+
+### Fixed
+- **Quick Capture's "Also open in Editor" was resetting last-used tool and stroke width.** `DetachedEditorWindowController.open(...)` had `tool: .arrow` / `strokeWidth: 3` as parameter defaults and unconditionally wrote them to the new EditorView on every open, which triggered the `currentTool` didSet that persists globally — so opening the editor (Quick Capture, History → Open in Editor, Pin → Edit) silently overwrote `lastUsedTool` and `currentStrokeWidth` for the entire app. Parameters are now optional with `nil` default; the editor only overrides when a caller explicitly passes a value, otherwise the EditorView's own UserDefaults-backed initializers are honored. Refs #58.
+
+## [4.1.0-beta.7] - 2026-05-03
+
+### Added
+- **Per-glyph Stroke control for the text tool** — alongside the existing Fill and Outline toggles, a third "Stroke" swatch+toggle draws a stroke around each character via `NSAttributedString` `.strokeColor` / `.strokeWidth`. Persists across captures, propagates to selected text annotations, and is preserved through clone/codable for undo and history reload.
+
+### Changed
+- **Recording bitrate increased so screen content stays crisp.** The bppf-based model assumed screen recordings are low-entropy, but H.264 softens sharp text edges below ~0.30 bppf the moment any motion enters the frame. Defaults (.high, 1440p30) were producing ~21 Mbit/s vs. the ~40 Mbit/s industry-standard. New tiers target ~12 / ~22 / ~40 Mbit/s at 1440p30 for low/medium/high. B-frames disabled (standard tuning for screen content). File sizes for `.high` roughly double — the right tradeoff for a tier explicitly named "High". Closes #140.
+- **Sparkle update check interval reduced from 30 minutes to 24 hours** so update prompts don't reappear constantly during release windows.
+
+### Fixed
+- **Editor fits large images to the window on open.** Opening a multi-megapixel image (e.g. a 24MP photo via Photos.app "Edit in macshot") presented only the top-left corner because the EditorView document was sized to full image dimensions while the scroll view stayed at 1× magnification. The fit-to-viewport magnification is now computed on open and applied when < 1.0; small images keep 1× so they aren't upscaled. Closes #161.
+- **Clicking outside the selection no longer wipes annotation progress.** Once a selection rect is committed, clicking in the dimmed area outside the rect previously dropped all annotations and started a new selection from that point — a recurring source of lost work. Treat outside clicks as a no-op when a selection already exists; ESC still cancels deliberately. Closes #154.
+- **Video editor effects no longer silently no-op** when the AVAsset's tracks haven't finished parsing. The synchronous `asset.tracks(withMediaType:)` accessor on a freshly-finalized recording could return an empty array before the moov atom was parsed; the effects composition then cached a stale trackID and `sourceFrame(byTrackID:)` returned nil. Switched to async `load(.tracks)` and built dimensions, duration, player item, and compositor state from the resolved track.
+- **S3 and Google Drive image uploads ignored the filename template.** Both uploaders hardcoded `"Screenshot {YYYY-MM-DD_HH-mm-ss}.png"`, so user templates (`{unix}`, `{random}`, `{window}`, etc.) didn't apply. Image uploads now read the same `filenameTemplate` UserDefault that local saves use, matching the convention video uploads already follow. imgbb intentionally unchanged — its API doesn't accept a filename. Closes #147.
+- **Changing the censor mode on a selected censor rect now updates it.** The mode segment in the censor tool's options bar wrote to UserDefaults but ignored the selected annotation; reading was symmetric (always showed the global default, never the annotation's actual mode). Selected censor rects now re-bake on mode change and the segment shows the annotation's current mode while it's selected.
+
+## [4.1.0-beta.6] - 2026-04-21
+
+### Added
+- **`{random}` filename token** — screenshot and recording filename templates now support a `{random}` placeholder that renders a fresh 8-character lowercase base36 string per file. Closes #136.
+
+### Changed
+- **Clicking a history entry in the menu bar now shows the floating thumbnail** for visual confirmation, instead of silently copying to clipboard with no feedback. The thumbnail's Edit action opens the original history entry. Closes #133.
+
+### Fixed
+- **Stroke width, line style, arrow style, shape fill, corner radius, and arrow Flip now persist globally even when an annotation is selected.** Changing these while editing an existing annotation only mutated that annotation — the UserDefaults write was in an `else` branch that never ran in edit mode — so the next capture reverted to whatever was last persisted (stroke defaulted to 3). Refs #58.
+- **"Enable macshot:// URL scheme" checkbox was not localized** (raw string literal, not wrapped in `L()`). Also added the missing `"Save Recording"` key that was referenced in `AppDelegate` but absent from every `.strings` file. Closes #134.
+
+## [4.1.0-beta.5] - 2026-04-19
+
+### Fixed
+- **Video editor export with freeze frames** — saving or uploading a video that contained a freeze failed with "Export failed" because `AVAssetExportSession` choked on the 600× `scaleTimeRange` a freeze bakes into the composition track. Freezes now route through the custom video compositor, which uses its time map to serve the same source frame for every composition time during the hold — matching how preview already renders them.
+
+## [4.1.0-beta.4] - 2026-04-18
+
+### Added
+- **Freeze-frame effect in the video editor** — hold a single source frame for a chosen duration (0.25s, 0.5s, 1s, 2s, 3s, 5s presets, 0.1–30s range). Shown on the effects band as a violet snowflake pill anchored at the source moment. Works alongside cuts and speeds: a freeze inside a speed segment splits it, a freeze inside a cut is silently dropped. Audio goes silent during the hold, matching what viewers expect.
+
+### Changed
+- **Zoom effect now zooms into the area you actually drew** — previously the rect was vertically mirrored at render time because the overlay coordinates (y-down) and CIImage transforms (y-up) hadn't been reconciled.
+- **"Open in Finder" on recording stop reveals the file in your configured recording directory** (or screenshot save dir, or via a Save panel) — not the sandbox tmp folder. Files become something you can actually find and keep.
+- **Clipboard copy uses a nicely named file** (`Screenshot 2026-04-18 at 18-33.png` inside `tmp/macshot-clipboard/`) overwritten on each copy. Finder paste no longer nags "A newer item named 'macshot-clipboard.png' already exists."
+- **Video editor time labels now sit above the trim bar** with 4pt breathing room, so the "Copied to clipboard!" status banner doesn't crowd the effects band below.
+- **Video editor playback is ~17% lighter on the main thread** — timeline thumbnails are pre-composited into a single cached strip, and the 30Hz playhead observer now invalidates only the trim-bar stripe so the bottom button row stays off the per-frame draw path.
+- **Settings window widened 560 → 620pt, label column 140 → 180pt, checkbox titles wrap gracefully** so Polish, German, Dutch, and other long translations fit without clipping.
+
+### Fixed
+- **Settings window clipping in Polish and other long-string locales** — "Szybkie przechwycenie:" was losing its trailing colon, "Automatycznie zamazuj dane wrażliwe" was being truncated. Closes #130.
+- **Tmp-file accumulation** — clipboard intermediates, share-sheet temps, cancelled recordings, and sandbox write-quarantine stubs all accumulated in the sandbox tmp folder indefinitely. A new `LaunchCleanup` framework now sweeps these: fixed-path overwrites for the clipboard and recording-clipboard files, a dedicated `tmp/macshot-share/` subfolder with a 5-minute TTL, and a pattern-based sweep with a 24-hour TTL for everything else. One tester reported 1.2 GB of leftovers before this fix; now it stays at a few hundred KB steady state. Closes #128.
+- **History panel orphan files** — past builds sometimes wrote `_preview.png` alongside a history entry without cleaning it up on delete. `ScreenshotHistory` now prunes these on launch by diffing the history dir against `index.json`.
+
+## [4.1.0-beta.3] - 2026-04-18
+
+### Added
+- **Cut segments in the video editor** — remove a range of frames from the exported video. Cuts are temporal (frames physically skipped) and integrate into preview, MP4/GIF export, and upload. Trim bar shows striped red overlays over cut ranges.
+- **Speed segments in the video editor** — retime a source range at 0.25×, 0.5×, 0.75×, 2×, 3×, 5×, or 10×. Shared `buildProcessedComposition` pipeline bakes trim + cuts + speed into a single composition via `scaleTimeRange`, keeping video and audio in sync across all three effects.
+- **Right-click to anchor capture rect** — right-click an empty overlay to start a selection at that point, then move the cursor without holding any button. Left-click (or a second right-click) commits; ESC cancels. Shift-constrain and Space-reposition work the same as in drag mode. Closes #127.
+- **"Open Video…" menu entry** — opens a user-owned video in the editor for trimming / effects / export without touching the source file.
+- **Keyboard navigation in the history overlay** — left/right arrows, Enter/Cmd+C to copy, Cmd+E to open in editor, Space for Quick Look, Delete to remove. Hover now updates the keyboard selection so arrow keys always step from wherever the mouse last pointed.
+- **Dock right-click shows each window individually** — editor, video editor, and preferences windows each appear as their own menu item; clicking brings that specific window forward.
+
+### Changed
+- **Background windows no longer jump forward when triggering a capture** — editor/preferences/Sparkle windows stay behind the user's frontmost app during a screenshot. Stashing only kicks in when another app was frontmost, so screenshotting a macshot window that's already in focus still works.
+- **Video editor title now includes the source filename (or timestamp for image editor)** so multiple editor windows are distinguishable in Mission Control and the Window menu.
+- **Video editor min width bumped** so the quality dropdown fits without clipping.
+- **Video editor time label shows the actual output duration** (post cuts + speed) instead of just the raw trim span.
+- **Stronger default blur radius** for censored video regions — previous value left faint shapes visible.
+- **High / Medium / Low label in the quality dropdown now follows the UI language** (was always English).
+
+### Fixed
+- **Video editor no longer flickers to black** when editing a zoom or censor rect while cuts are present. Player-item swaps are now guarded by a cut/speed topology fingerprint, so rect edits on existing effects stay flicker-free.
+- **History panel selection flicker** when mixing mouse hover and arrow keys — hover and keyboard selection now share a single outlined-card state.
+- **Settings window filename templates** now persist correctly across close/reopen (were reverting to the default).
+- **Video editor status/time label placement** when the effects band grows to multiple rows.
+
+## [4.1.0-beta.2] - 2026-04-18
+
+### Added
+- **Video censor segments** — a new effect type alongside zoom. Define a rectangular region on the video that's obscured for a given time window, with three styles: solid black, pixelate, or gaussian blur. Two censors can overlap to blur different regions simultaneously.
+- **Direct-manipulation effect rectangles** — when a zoom or censor segment is selected, drag/resize the rect directly on the video preview. For zoom, the rect defines the zoom target (zoom level is derived from rect size, clamped 1.2×–5×). For censor, the rect defines the region to hide. Replaces the earlier mini-thumbnail popover.
+- **Multi-row effects band** — overlapping zooms and censors stack into separate rows automatically. Up to 4 rows visible; beyond that the effects band scrolls vertically. Row separators keep stacked pills readable.
+- **Cursor-follow "+" affordance** — hover the effects band to see a "+" follow your cursor, click to open the Add Effect menu at that position. Right-click any empty spot or existing pill also opens a context menu.
+- **Fade submenu on pills** — right-click a zoom or censor pill to pick a fade duration (None / 0.15 / 0.35 / 0.50 / 1.00 s). Applies to both fade-in and fade-out.
+
+### Changed
+- **Custom AVVideoCompositing** for zoom + censor rendering. Per-frame Core Image pipeline replaces `setTransformRamp` stepping — smooth motion, filter-based effects (blur/pixelate) alongside transform-based zoom, single render path shared by live preview, MP4 export (both AVAssetExportSession and quality-preset reencode), and GIF export.
+- **Recording selection border color** now respects the current theme's accent color instead of hardcoded purple.
+- **Recording color space** is now forced to sRGB at capture time (macOS 14+), fixing washed-out playback when recording on Display P3 screens.
+
+### Fixed
+- Blur and pixelate filters no longer wash out the untouched portions of the frame — compositor now uses a linear working color space and tags the output buffer with the source color space.
+
+## [4.1.0-beta.1] - 2026-04-17
+
+### Added
+- **Video export quality presets** — Low / Medium / High dropdown in the video editor. Non-High presets re-encode via a custom AVAssetReader → AVAssetWriter pipeline so the chosen bitrate is actually applied (AVAssetExportSession presets hardcode bitrate). Estimated output size in the editor factors in the chosen preset. Recording still writes at High so quality loss only happens at export time.
+- **Timeline zoom segments in the video editor** — dedicated Zooms track below the trim timeline. Dashed "Click to zoom" placeholders fill every free gap in the row; clicking places a new 2x zoom segment at the cursor. Pills have visible resize handles (styled like the trim handles) and can be dragged or resized without overlapping.
+- **Zoom segment settings popover** — click a selected pill to open a popover with a thumbnail preview, a 3×3 snap grid overlaid directly on the thumbnail for quick center selection, freeform drag for fine positioning, a zoom-level slider (1.2×–5×), and a Delete zoom button. Fades auto-scale so the plateau stays dominant on short segments.
+- **Delete from floating thumbnail** — right-click menu on the post-capture thumbnail now includes a Delete option that removes the entry from screenshot history.
+
+## [4.0.5-beta.22] - 2026-04-17
+
+### Changed
+- **Settings window redesign** — cleaner layout and stable Debug signing.
+
+### Fixed
+- **Mono theme selected-tool contrast** — the selected tool's icon is now readable against the Mono accent (was white-on-light-gray, now white-on-dark-gray).
+
+## [4.0.5-beta.13] - 2026-04-15
+
+### Added
+- **Copy Screen Info** button in Settings > About — copies display and capture diagnostics to clipboard for bug reports.
+
+### Fixed
+- **Wrong colors on external monitors (third attempt)** — removed the 8-bit pixel format conversion (`copyTo8BitBGRA`) that was corrupting colors on some monitors. The raw CGImage from ScreenCaptureKit is now passed through directly and AppKit handles color management natively, matching how other screenshot tools (e.g. Shottr) work.
+- **Editor cursor previews not showing** — loupe follow, pencil/marker circle, stamp preview, and other cursor overlays were broken in the editor window since beta 9. A window-snap cooldown flag was blocking `mouseMoved` events.
+
+## [4.0.5-beta.11] - 2026-04-15
+
+### Fixed
+- **Wrong colors on external monitors (editor + saved files)** — captured screenshots are now normalized to sRGB at capture time instead of preserving the monitor's native ICC profile. Some external monitors (e.g. ViewSonic VX4380) have profiles that don't round-trip correctly through AppKit's rendering pipeline. Converting to sRGB immediately after ScreenCaptureKit returns the raw image ensures correct colors everywhere.
+- **Last used tool not persisted across app restarts** — the selected annotation tool (pencil, arrow, etc.) now survives app restarts via UserDefaults.
+
+## [4.0.5-beta.10] - 2026-04-15
+
+### Fixed
+- **Wrong colors on external monitors (editor + saved files)** — replaced all uses of `CGColorSpaceCreateDeviceRGB()` (device-dependent, untagged) with either the source image's ICC profile or explicit sRGB. Fixes wildly shifted colors on displays with non-standard color profiles (e.g. ViewSonic VX4380, VG2448).
+
+## [4.0.5-beta.9] - 2026-04-15
+
+### Added
+- **Capture Last Area** — new action that opens the overlay with the previous selection pre-applied. Available in the menu bar, as a configurable hotkey (Settings > Shortcuts), and via `macshot://capture-last` URL scheme.
+- **URL scheme toggle** — "Enable macshot:// URL scheme" checkbox in Settings (enabled by default).
+
+### Fixed
+- **Instant overlay** — overlay now appears immediately (transparent) while screenshots capture in background. Eliminates all delay on hotkey press.
+- **Window snap highlight race condition** — snap query deferred until screenshot arrives, preventing blue highlight artifacts on the transparent pre-screenshot overlay.
+- **Permanent ScreenCaptureKit cache** — display enumeration cached for app lifetime, only refreshed on monitor connect/disconnect. First capture after launch is the only slow one.
+
+### Changed
+- **Removed "Remember last selection area" setting** — selection is now always saved. Use the new "Capture Last Area" action to re-capture the same region on demand.
+- **Multi-select moved to Ctrl+click** — consistent with Ctrl+drag for lasso. Shift is now purely for angle/shape constraining.
+
+## [4.0.5-beta.8] - 2026-04-14
+
+### Fixed
+- **Completely wrong colors on some external monitors** — displays with certain ICC profiles (e.g. ViewSonic 4K) caused the 8-bit pixel conversion to fail silently, passing through raw 16-bit GPU data with swapped Red/Blue channels. Now tries multiple pixel formats with automatic fallback.
+
+## [4.0.5-beta.7] - 2026-04-14
+
+### Fixed
+- **Reverted capture pipeline to v4.0.4** — experimental performance changes introduced race conditions and rendering artifacts. Capture flow restored to the stable v4.0.4 implementation.
+
+## [4.0.5-beta.5] - 2026-04-14
+
+### Added
+- **DMG drag-to-install layout** — DMG now shows app icon + Applications folder with arrow background, matching the standard macOS install experience.
+- **Move to Applications prompt** — when launched from a DMG or translocated path, offers to copy the app to /Applications with one click.
+- **Duplicate instance alert** — shows a message instead of silently quitting when macshot is already running.
+
+### Fixed
+- **Saved screenshots have wrong colors on multi-monitor setups** — the save pipeline was converting Display P3 pixels to sRGB, shifting colors on mixed-colorspace setups (P3 built-in + sRGB external). Now embeds the native display color profile without altering pixel values. Removed the "Embed sRGB color profile" toggle — native profile is always embedded.
+- **GIF export crash on longer recordings** — `CGImageDestinationFinalize` read freed pixel buffer memory (use-after-free) because `alwaysCopiesSampleData=false` allowed buffer recycling. Each frame's pixels are now copied into an owned context immediately.
+- **GIF export freezes the UI** — switched from Swift concurrency `Task.detached` (cooperative thread pool shares threads with the main actor) to GCD `.background` queue (real kernel thread that macOS deprioritizes).
+- **GIF export shows no progress** — "Processing GIF…" status now persists with a percentage indicator (0–50% during frame reading, then 100% after finalize).
+- **Focus not returning to previous app** — `dismissOverlays` in `startCapture` was consuming `previousApp` before the new capture started, so focus couldn't be returned after the capture finished.
+- **Text tool can't select other annotations** — clicking an arrow/rectangle while in text mode now selects it instead of requiring a tool switch.
+- **Text annotation bounding box too wide** — width now shrinks to fit the actual text content on commit instead of keeping the original drag width. Fixed single-character minimum width.
+- **Multi-select conflicts with Shift constraining** — multi-select moved from Shift+click to Ctrl+click, consistent with Ctrl+drag for lasso. Shift is now purely for angle/shape constraining.
+
+### Changed
+- **Faster first capture** — Core Animation/Metal pipeline pre-warmed at app launch. ScreenCaptureKit content cache no longer bypassed on every capture.
+
+## [4.0.5-beta.3] - 2026-04-14
+
+### Added
+- **URL scheme for external tools** — trigger macshot actions from Raycast, Alfred, BetterTouchTool, Shortcuts, or any automation tool via `macshot://capture`, `macshot://ocr`, `macshot://record`, and more. Run `open macshot://capture` from Terminal to test.
+
+### Fixed
+- **Color dithering in pinned images and editor window** — macOS's window compositor applies ordered dithering to layer content rendered via `draw()`, altering pixel values in solid-color areas (e.g. `#111D2F` becomes an alternating pattern of `#121D2F`, `#101D2E`, `#131D2D`). This was visible when re-capturing pinned screenshots or the editor window with the overlay. Fixed by disabling the `AutomaticAppKit` layer content format in favor of explicit `RGBA8`, ensuring pixel-perfect color reproduction.
+- **Editor window color shift** — "Open in Editor Window" cropped the selection into a `CGColorSpaceCreateDeviceRGB` context, converting Display P3 pixels to DeviceRGB and shifting colors. Now uses zero-copy `CGImage.cropping()` which preserves the original color space.
+- **Slow first capture with window snapping** — every capture with floating thumbnails visible bypassed the ScreenCaptureKit content cache, causing a slow window server enumeration on each capture. Now uses the cache and only re-fetches if an excluded window isn't found.
+- **Untranslated "None" in hotkey settings** — unassigned hotkey slots showed English "None" regardless of app language.
+- **Minor translation fixes** — corrected missing diacritics in Catalan and Romanian translations.
+
+## [4.0.4] - 2026-04-13
 
 ### Added
 - **Customizable toolbar background color** — new "Background color" setting in Preferences > Appearance. All toolbar text, icons, borders, and system controls adapt to stay readable on any background.
 - **Adaptive toolbar appearance** — toolbar and popovers automatically switch between light and dark AppKit appearance based on background brightness.
-
-### Fixed
-- **Global hotkeys stop working after closing editor** — `NSApp.hide(nil)` could suspend the Carbon event loop; replaced with cooperative focus transfer.
-- **Window snap highlight not showing on overlay appear** — snap query now runs immediately at the mouse position instead of waiting for mouse movement. (PR #100, thanks @TimFang4162)
-
-### Changed
-- **Lasso selection moved to Ctrl+drag** — frees Shift for line/shape constraining without timing conflicts.
-- **Stamp quick bar trimmed** — removed less common emojis (edit, lock, lightning, pin) from the quick bar; still accessible via the emoji picker.
-- **Translations** — added "Background color:" and "Play sound on capture" across all 40 locales.
-
-## [4.0.4-beta.1] - 2026-04-10
-
-### Added
 - **Export dimensions dropdown** — scale down recordings before saving (Original, 75%, 50%, 33%, 25%). Applied at export time; recordings always capture at full resolution.
 - **Estimated export file size** — shows estimated output size in the video editor when trim, scale, or format change would affect the result.
 
 ### Fixed
-- **Cursor flicker after finishing a stroke** — the annotation cache is now incrementally updated on commit instead of rebuilt from scratch, eliminating the frame gap.
+- **Multi-line text clipped after commit** — text snapshot now uses the same measurement as the rendering engine, preventing the last line from being cut off at non-default font sizes.
+- **Ctrl+lasso broken in pencil mode** — Ctrl now enables instant annotation selection in pencil mode (no long-press delay). Multi-selections can be dragged without holding Ctrl, matching all other tools.
+- **Pen pressure over-smoothing after many strokes** — committed annotations are now drawn from a cached bitmap during active drawing, preventing progressive frame time degradation that caused macOS to coalesce tablet events and reduce stroke fidelity.
+- **Pen pressure range** — light touch now gives 20–100% of stroke width (was 30–100%) for finer control.
+- **Apple Translation language list empty on first use** — the Translation framework can return stale results at launch; empty results are no longer cached, so the language picker retries on next open.
+- **Global hotkeys stop working after closing editor** — `NSApp.hide(nil)` could suspend the Carbon event loop; replaced with cooperative focus transfer.
+- **Window snap highlight not showing on overlay appear** — snap query now runs immediately at the mouse position instead of waiting for mouse movement. (PR #100, thanks @TimFang4162)
+- **Smoother refined pencil stroke tails** — end of refined strokes no longer has an abrupt straight segment.
+- **Cursor flicker after finishing a stroke** — the annotation cache is now incrementally updated on commit instead of rebuilt from scratch.
 - **Video editor bottom bar overlap** — left-side info gracefully hides when the window is narrow instead of overlapping action buttons.
-- **Timeline thumbnail seams** — sub-pixel gaps between thumbnail tiles eliminated with floor/ceil rounding.
+- **Timeline thumbnail seams** — sub-pixel gaps between thumbnail tiles eliminated.
 
 ### Changed
+- **Lasso selection moved to Ctrl+drag** — frees Shift for line/shape constraining without timing conflicts.
 - **Video editor minimum width** increased to 820px to ensure all controls fit.
-- **~785 lines of dead code removed** — identified by Periphery static analysis across 5 cleanup batches.
 
 ## [4.0.3] - 2026-04-10
 

@@ -1,5 +1,8 @@
 import Cocoa
 import Carbon
+import os.log
+
+private let hotkeyLog = OSLog(subsystem: "com.sw33tlie.macshot.macshot", category: "hotkey-timing")
 
 class HotkeyManager {
 
@@ -16,6 +19,7 @@ class HotkeyManager {
         case quickCapture = 7
         case scrollCapture = 8
         case openFromClipboard = 9
+        case captureLastArea = 10
 
         var keyCodeKey: String {
             switch self {
@@ -28,6 +32,7 @@ class HotkeyManager {
             case .quickCapture: return "hotkeyQuickCaptureKeyCode"
             case .scrollCapture: return "hotkeyScrollCaptureKeyCode"
             case .openFromClipboard: return "hotkeyOpenClipboardKeyCode"
+            case .captureLastArea: return "hotkeyCaptureLastAreaKeyCode"
             }
         }
 
@@ -42,6 +47,7 @@ class HotkeyManager {
             case .quickCapture: return "hotkeyQuickCaptureModifiers"
             case .scrollCapture: return "hotkeyScrollCaptureModifiers"
             case .openFromClipboard: return "hotkeyOpenClipboardModifiers"
+            case .captureLastArea: return "hotkeyCaptureLastAreaModifiers"
             }
         }
 
@@ -60,6 +66,7 @@ class HotkeyManager {
             case .quickCapture: return L("Quick Capture")
             case .scrollCapture: return L("Scroll Capture")
             case .openFromClipboard: return L("Open from Clipboard")
+            case .captureLastArea: return L("Capture Last Area")
             }
         }
 
@@ -74,12 +81,13 @@ class HotkeyManager {
             case .quickCapture: return UInt32(kVK_ANSI_S)
             case .scrollCapture: return 0
             case .openFromClipboard: return 0  // no default hotkey
+            case .captureLastArea: return 0    // no default hotkey
             }
         }
 
         var defaultModifiers: UInt32 {
             switch self {
-            case .recordScreen, .scrollCapture, .openFromClipboard: return 0
+            case .recordScreen, .scrollCapture, .openFromClipboard, .captureLastArea: return 0
             default: return UInt32(cmdKey | shiftKey)
             }
         }
@@ -118,7 +126,7 @@ class HotkeyManager {
     }
 
     /// Register all hotkeys with their callbacks.
-    func registerAll(captureArea: @escaping () -> Void, captureFullScreen: @escaping () -> Void, recordArea: @escaping () -> Void, recordScreen: @escaping () -> Void, historyOverlay: @escaping () -> Void, captureOCR: @escaping () -> Void, quickCapture: @escaping () -> Void, scrollCapture: @escaping () -> Void, openFromClipboard: @escaping () -> Void) {
+    func registerAll(captureArea: @escaping () -> Void, captureFullScreen: @escaping () -> Void, recordArea: @escaping () -> Void, recordScreen: @escaping () -> Void, historyOverlay: @escaping () -> Void, captureOCR: @escaping () -> Void, quickCapture: @escaping () -> Void, scrollCapture: @escaping () -> Void, openFromClipboard: @escaping () -> Void, captureLastArea: @escaping () -> Void) {
         unregisterAll()
         register(slot: .captureArea, callback: captureArea)
         register(slot: .captureFullScreen, callback: captureFullScreen)
@@ -129,6 +137,7 @@ class HotkeyManager {
         register(slot: .quickCapture, callback: quickCapture)
         register(slot: .scrollCapture, callback: scrollCapture)
         register(slot: .openFromClipboard, callback: openFromClipboard)
+        register(slot: .captureLastArea, callback: captureLastArea)
     }
 
     private func installEventHandler() {
@@ -147,13 +156,18 @@ class HotkeyManager {
                                   nil, MemoryLayout<EventHotKeyID>.size, nil, &hotkeyID)
 
                 if let slot = HotkeySlot(rawValue: Int(hotkeyID.id)), let callback = mgr.callbacks[slot] {
+                    os_log("CARBON HANDLER ENTERED slot=%{public}d abs=%{public}.6f isMain=%{public}@",
+                           log: hotkeyLog, type: .info,
+                           slot.rawValue, CFAbsoluteTimeGetCurrent(),
+                           Thread.isMainThread ? "YES" : "NO")
                     if NSApp.modalWindow != nil {
                         NSApp.stopModal()
                         NSApp.modalWindow?.close()
-                        DispatchQueue.main.async { callback() }
-                    } else {
-                        callback()
                     }
+                    callback()
+                    os_log("CARBON HANDLER RETURNED slot=%{public}d abs=%{public}.6f",
+                           log: hotkeyLog, type: .info,
+                           slot.rawValue, CFAbsoluteTimeGetCurrent())
                 }
                 return noErr
             },
@@ -162,7 +176,7 @@ class HotkeyManager {
     }
 
     func unregisterAll() {
-        for (slot, ref) in hotKeyRefs {
+        for (_, ref) in hotKeyRefs {
             UnregisterEventHotKey(ref)
         }
         hotKeyRefs.removeAll()
@@ -209,7 +223,7 @@ class HotkeyManager {
     /// Display string for a slot's current hotkey.
     static func displayString(for slot: HotkeySlot) -> String {
         let (keyCode, modifiers) = readHotkey(for: slot)
-        if keyCode == 0 && modifiers == 0 { return "None" }
+        if keyCode == 0 && modifiers == 0 { return L("None") }
         return modifierString(from: modifiers) + keyString(from: keyCode)
     }
 

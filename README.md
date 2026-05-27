@@ -5,8 +5,10 @@
 </p>
 
 <p align="center">
-  <b>Free, open-source screenshot & screen recording tool for macOS.</b><br>
-  Native Swift + AppKit. No Electron. No bloat.
+  <b>The most feature-rich open-source screenshot tool on macOS.</b><br>
+  <br>
+  18+ annotation tools, screen recording with a full video editor, OCR + translation,<br>
+  auto-redact PII, scroll capture, beautify — all native, all free.
 </p>
 
 <p align="center">
@@ -15,6 +17,10 @@
 
 <p align="center">
   <img src="assets/preview.png" alt="macshot demo" width="700"/>
+</p>
+
+<p align="center">
+  <img src="assets/preview-editor.png" alt="macshot video editor — timeline with cut, speed, freeze, zoom and censor effects" width="700"/>
 </p>
 
 ---
@@ -34,7 +40,7 @@
 
 **Homebrew:**
 ```bash
-brew install sw33tlie/macshot/macshot
+brew install --cask macshot
 ```
 
 **Manual:** Download the latest `.dmg` from [Releases](https://github.com/sw33tLie/macshot/releases), open it, drag to `/Applications`.

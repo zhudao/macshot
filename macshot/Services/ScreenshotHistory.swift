@@ -53,6 +53,33 @@ class ScreenshotHistory {
         }
 
         loadIndex()
+        pruneOrphanedFiles()
+    }
+
+    /// Delete files in the history directory that aren't referenced by
+    /// any entry in `index.json`. Catches orphans from past bugs where a
+    /// `_preview.png` / `_raw.png` / `_annotations.json` was written but
+    /// never cleaned up. Runs once at startup off the main thread via
+    /// the shared `DirectorySweeper` helper.
+    private func pruneOrphanedFiles() {
+        let dir = historyDir
+        let indexName = indexFile.lastPathComponent
+        let validIDs = Set(entries.map { $0.id })
+        DispatchQueue.global(qos: .utility).async {
+            DirectorySweeper.sweep(
+                directory: dir,
+                // No age filter — orphan detection is by UUID-prefix
+                // lookup against `index.json`, not mtime.
+                olderThan: nil,
+                shouldDelete: { name in
+                    if name == indexName { return false }
+                    guard name.count >= 36 else { return false }
+                    let uuid = String(name.prefix(36))
+                    guard UUID(uuidString: uuid) != nil else { return false }
+                    return !validIDs.contains(uuid)
+                }
+            )
+        }
     }
 
     // MARK: - Public API
@@ -108,7 +135,10 @@ class ScreenshotHistory {
             let thumb = self.makeThumbnail(image: image, maxWidth: 36)
             let preview = self.makePreview(image: image)
 
-            // Update the entry's thumbnail on main thread
+            // Briefly hold the thumbnail in memory so the menu bar can render
+            // it before the disk write lands. Cleared once the disk file is
+            // safely on-disk — subsequent reads go through loadThumbnail's
+            // disk path so we don't pin every entry's bitmap forever.
             DispatchQueue.main.async {
                 if let idx = self.entries.firstIndex(where: { $0.id == id }) {
                     self.entries[idx].thumbnail = thumb
@@ -142,6 +172,14 @@ class ScreenshotHistory {
             }
             if let annData = annotationData {
                 try? annData.write(to: annURL, options: .atomic)
+            }
+
+            // Disk artifacts are now on disk — drop the in-memory thumbnail.
+            // loadThumbnail() will read from disk on next access.
+            DispatchQueue.main.async {
+                if let idx = self.entries.firstIndex(where: { $0.id == id }) {
+                    self.entries[idx].thumbnail = nil
+                }
             }
         }
     }
@@ -201,6 +239,14 @@ class ScreenshotHistory {
                 try? annData.write(to: annURL, options: .atomic)
             } else {
                 try? FileManager.default.removeItem(at: annURL)
+            }
+
+            // Disk artifacts updated — drop the in-memory thumbnail so the
+            // next read pulls the fresh on-disk version through loadThumbnail.
+            DispatchQueue.main.async {
+                if let idx = self.entries.firstIndex(where: { $0.id == id }) {
+                    self.entries[idx].thumbnail = nil
+                }
             }
         }
     }

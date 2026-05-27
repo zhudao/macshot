@@ -212,11 +212,14 @@ final class HistoryOverlayController: NSObject, QLPreviewPanelDataSource, QLPrev
     func saveToFile(index: Int) {
         let entries = ScreenshotHistory.shared.entries
         guard index >= 0, index < entries.count else { return }
-        guard let image = ScreenshotHistory.shared.loadImage(for: entries[index]) else { return }
+        let entry = entries[index]
+        guard let image = ScreenshotHistory.shared.loadImage(for: entry) else { return }
         guard let imageData = ImageEncoder.encode(image) else { return }
 
+        let template = UserDefaults.standard.string(forKey: FilenameFormatter.userDefaultsKey) ?? FilenameFormatter.defaultTemplate
+        let base = FilenameFormatter.format(template: template, date: entry.timestamp)
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = "Screenshot.\(ImageEncoder.fileExtension)"
+        panel.nameFieldStringValue = "\(base).\(ImageEncoder.fileExtension)"
         panel.level = .floating
         panel.begin { response in
             guard response == .OK, let url = panel.url else { return }
@@ -329,9 +332,37 @@ private final class HistoryPanelView: NSView, NSDraggingSource {
 
     private var entries: [HistoryEntry] = []
     private var filteredIndices: [Int] = []
+    /// Bounded preview cache. Eager-loading every entry's preview was hammering
+    /// memory for users with hundreds of history items (#mem-audit). Now we
+    /// load only what's drawn, evict oldest beyond `previewCacheLimit`, and
+    /// drop the whole thing on dismiss when the view is released.
     private var previews: [String: NSImage] = [:]
+    /// Preview ids in MRU order — most recent at the end. Lookups bump the id
+    /// to the end; eviction pops the front. Bounded so memory stays roughly
+    /// constant regardless of total history size.
+    private var previewLRU: [String] = []
+    /// In-flight load ids — guards against duplicate work when a card is
+    /// drawn multiple times before the load resolves.
+    private var previewLoadsInFlight: Set<String> = []
+    /// Soft cap on cached previews. Three screens of cards (~50 each) leaves
+    /// headroom for fast back-scrolling without re-loading from disk, while
+    /// keeping peak footprint bounded (~75 MB worst case at typical preview
+    /// dimensions, but usually much less because previews are tiny PNGs).
+    private static let previewCacheLimit = 150
+    /// How many cards to lookahead in the scroll direction to pre-fetch so
+    /// scrolling doesn't show empty cards before the load resolves.
+    private static let previewPrefetchLookahead = 12
     private var cardRects: [NSRect] = []
+    /// Filtered-index of the card the mouse is currently over, or -1.
+    /// Only drives the darkened overlay + "Click to copy" hint now — the
+    /// accent outline comes from `selectedIndex` so hover and keyboard
+    /// navigation never fight over which card is highlighted.
     private var hoveredIndex: Int = -1
+    /// Unified selection: updated by arrow keys AND by mouse hover. The
+    /// outlined card is always `selectedIndex`, so arrow keys always step
+    /// from whatever the mouse is pointing at. Hint overlay is keyed off
+    /// `hoveredIndex` separately. -1 until loadEntries lands a default.
+    private var selectedIndex: Int = -1
     private var activeFilter: HistoryFilter = .all
     private var filterTabRects: [NSRect] = []
 
@@ -377,18 +408,111 @@ private final class HistoryPanelView: NSView, NSDraggingSource {
     func loadEntries() {
         entries = ScreenshotHistory.shared.entries
         applyFilter()
+        // Previews are loaded lazily as cards become visible — see
+        // requestPreviewIfNeeded(for:) and prefetchPreviewsAroundVisible().
+        // Kick off prefetch for the first screenful so the panel doesn't
+        // open with empty placeholders.
+        prefetchPreviewsAroundVisible()
+    }
 
-        let entriesToLoad = entries
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            var loaded: [String: NSImage] = [:]
-            for entry in entriesToLoad {
-                if let preview = ScreenshotHistory.shared.loadPreview(for: entry) {
-                    loaded[entry.id] = preview
-                }
+    // MARK: - Lazy Preview Loading
+
+    /// Return the cached preview for `entry`, or trigger an async load and
+    /// return nil. Keeps the cache bounded by evicting the oldest non-visible
+    /// entry when over the soft cap.
+    private func cachedPreview(for entry: HistoryEntry) -> NSImage? {
+        if let img = previews[entry.id] {
+            // Bump to MRU
+            if let pos = previewLRU.firstIndex(of: entry.id) {
+                previewLRU.remove(at: pos)
             }
+            previewLRU.append(entry.id)
+            return img
+        }
+        requestPreviewIfNeeded(for: entry)
+        return nil
+    }
+
+    private func requestPreviewIfNeeded(for entry: HistoryEntry) {
+        let id = entry.id
+        guard previews[id] == nil, !previewLoadsInFlight.contains(id) else { return }
+        previewLoadsInFlight.insert(id)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let preview = ScreenshotHistory.shared.loadPreview(for: entry)
             DispatchQueue.main.async {
-                self?.previews = loaded
-                self?.needsDisplay = true
+                guard let self = self else { return }
+                self.previewLoadsInFlight.remove(id)
+                guard let preview = preview else { return }
+                self.previews[id] = preview
+                self.previewLRU.append(id)
+                self.evictPreviewsIfNeeded()
+                self.needsDisplay = true
+            }
+        }
+    }
+
+    /// Pop oldest preview ids until cache is within `previewCacheLimit`.
+    /// Visible-region ids are protected — we walk the LRU front-to-back and
+    /// skip any id that's currently on screen (or within the lookahead zone)
+    /// so we don't immediately re-load what we just evicted.
+    private func evictPreviewsIfNeeded() {
+        guard previewLRU.count > Self.previewCacheLimit else { return }
+        let visibleIDs = currentVisibleAndPrefetchIDs()
+        var i = 0
+        while i < previewLRU.count && previews.count > Self.previewCacheLimit {
+            let id = previewLRU[i]
+            if visibleIDs.contains(id) { i += 1; continue }
+            previews.removeValue(forKey: id)
+            previewLRU.remove(at: i)
+        }
+    }
+
+    /// Set of entry ids currently drawn on screen plus the lookahead window
+    /// in either scroll direction. Used both to protect from eviction and to
+    /// drive prefetch.
+    private func currentVisibleAndPrefetchIDs() -> Set<String> {
+        guard !filteredIndices.isEmpty else { return [] }
+        var ids: Set<String> = []
+        let look = Self.previewPrefetchLookahead
+        // Find first/last visible filtered index.
+        var firstVisible = -1
+        var lastVisible = -1
+        for (fi, _) in filteredIndices.enumerated() {
+            guard fi < cardRects.count else { break }
+            var rect = cardRects[fi]
+            rect.origin.x -= scrollOffset
+            if rect.maxX > 0 && rect.origin.x < bounds.width {
+                if firstVisible == -1 { firstVisible = fi }
+                lastVisible = fi
+            }
+        }
+        if firstVisible == -1 {
+            // Nothing visible yet (panel just opened, layout not done) —
+            // seed with the first screenful.
+            firstVisible = 0
+            lastVisible = min(filteredIndices.count - 1, look * 2)
+        }
+        let lo = max(0, firstVisible - look)
+        let hi = min(filteredIndices.count - 1, lastVisible + look)
+        for fi in lo...hi {
+            let globalIndex = filteredIndices[fi]
+            if globalIndex < entries.count {
+                ids.insert(entries[globalIndex].id)
+            }
+        }
+        return ids
+    }
+
+    /// Kick off async loads for visible + lookahead-window entries. Cheap to
+    /// call repeatedly — `requestPreviewIfNeeded` no-ops on cache hits and
+    /// in-flight ids.
+    private func prefetchPreviewsAroundVisible() {
+        let ids = currentVisibleAndPrefetchIDs()
+        guard !ids.isEmpty else { return }
+        let entriesByID = Dictionary(uniqueKeysWithValues: entries.map { ($0.id, $0) })
+        for id in ids {
+            if let entry = entriesByID[id] {
+                requestPreviewIfNeeded(for: entry)
             }
         }
     }
@@ -398,7 +522,11 @@ private final class HistoryPanelView: NSView, NSDraggingSource {
             activeFilter.matches(entry) ? i : nil
         }
         scrollOffset = 0
+        // Default keyboard focus to the leftmost (most recent) card so the user
+        // can immediately arrow/Enter without moving the mouse.
+        selectedIndex = filteredIndices.isEmpty ? -1 : 0
         layoutCards()
+        prefetchPreviewsAroundVisible()
         needsDisplay = true
     }
 
@@ -453,7 +581,12 @@ private final class HistoryPanelView: NSView, NSDraggingSource {
 
             let entry = entries[globalIndex]
             let isHovered = (fi == hoveredIndex)
-            drawCard(entry: entry, rect: rect, isHovered: isHovered)
+            // Hover and keyboard selection share one outline: `selectedIndex`
+            // always follows the hovered card, so there's never a flicker
+            // when the mouse moves over a different card than the arrow-key
+            // selection.
+            let isSelected = (fi == selectedIndex)
+            drawCard(entry: entry, rect: rect, isHovered: isHovered, isSelected: isSelected)
         }
 
         drawScrollFades(in: cardClip)
@@ -544,16 +677,18 @@ private final class HistoryPanelView: NSView, NSDraggingSource {
         }
     }
 
-    private func drawCard(entry: HistoryEntry, rect: NSRect, isHovered: Bool) {
-        // Card background
-        let bgColor = isHovered
+    private func drawCard(entry: HistoryEntry, rect: NSRect, isHovered: Bool, isSelected: Bool) {
+        // Card background — same slight lift for hover OR keyboard selection
+        // so both states feel equivalent.
+        let lifted = isHovered || isSelected
+        let bgColor = lifted
             ? NSColor.white.withAlphaComponent(0.12)
             : NSColor.white.withAlphaComponent(0.05)
         bgColor.setFill()
         NSBezierPath(roundedRect: rect, xRadius: 10, yRadius: 10).fill()
 
-        // Hover border
-        if isHovered {
+        // Accent outline for hover AND keyboard selection.
+        if lifted {
             ToolbarLayout.accentColor.withAlphaComponent(0.7).setStroke()
             let border = NSBezierPath(roundedRect: rect.insetBy(dx: 1, dy: 1), xRadius: 9, yRadius: 9)
             border.lineWidth = 1.5
@@ -569,7 +704,7 @@ private final class HistoryPanelView: NSView, NSDraggingSource {
             width: rect.width - imgPad * 2,
             height: rect.height - labelH - imgPad)
 
-        if let img = previews[entry.id] {
+        if let img = cachedPreview(for: entry) {
             let aspect = img.size.width / max(img.size.height, 1)
             var drawRect: NSRect
             if aspect > imgArea.width / imgArea.height {
@@ -616,7 +751,7 @@ private final class HistoryPanelView: NSView, NSDraggingSource {
         let labelStr = "\(entry.pixelWidth) x \(entry.pixelHeight)  ·  \(entry.timeAgoString)" as NSString
         let labelAttrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 11, weight: .medium),
-            .foregroundColor: NSColor.white.withAlphaComponent(isHovered ? 0.85 : 0.45),
+            .foregroundColor: NSColor.white.withAlphaComponent(lifted ? 0.85 : 0.45),
         ]
         let labelSize = labelStr.size(withAttributes: labelAttrs)
         labelStr.draw(
@@ -677,6 +812,7 @@ private final class HistoryPanelView: NSView, NSDraggingSource {
         } else {
             scrollOffset = max(0, min(maxScroll, scrollOffset - delta * 8))
         }
+        prefetchPreviewsAroundVisible()
         needsDisplay = true
     }
 
@@ -693,7 +829,12 @@ private final class HistoryPanelView: NSView, NSDraggingSource {
 
         if newHovered != hoveredIndex {
             hoveredIndex = newHovered
+            // Keep keyboard selection in sync with the hovered card so arrow
+            // keys step from wherever the mouse last pointed. When the mouse
+            // leaves all cards we keep the prior selection — otherwise arrow
+            // nav would reset to -1 every time the cursor drifted off.
             if newHovered >= 0 {
+                selectedIndex = newHovered
                 NSCursor.pointingHand.set()
             } else {
                 NSCursor.arrow.set()
@@ -826,8 +967,88 @@ private final class HistoryPanelView: NSView, NSDraggingSource {
     // MARK: - Keyboard
 
     override func keyDown(with event: NSEvent) {
-        if event.keyCode == 53 { // ESC
+        let cmd = event.modifierFlags.contains(.command)
+
+        switch event.keyCode {
+        case 53: // ESC
             controller?.dismiss()
+        case 123: // Left arrow
+            moveSelection(by: -1)
+        case 124: // Right arrow
+            moveSelection(by: +1)
+        case 36, 76: // Return / Enter
+            activateSelectedForCopy()
+        case 49 where !cmd: // Space
+            activateSelectedForQuickLook()
+        case 51, 117: // Delete / Forward-Delete
+            activateSelectedForDelete()
+        case 8 where cmd: // Cmd+C
+            activateSelectedForCopy()
+        case 14 where cmd: // Cmd+E
+            activateSelectedForOpenEditor()
+        default:
+            super.keyDown(with: event)
         }
+    }
+
+    private func moveSelection(by delta: Int) {
+        guard !filteredIndices.isEmpty else { return }
+        // If no selection yet, start at the leftmost (when moving right) or
+        // the rightmost (when moving left).
+        let current = selectedIndex
+        let next: Int
+        if current < 0 {
+            next = delta > 0 ? 0 : filteredIndices.count - 1
+        } else {
+            next = max(0, min(filteredIndices.count - 1, current + delta))
+        }
+        guard next != current else { return }
+        selectedIndex = next
+        scrollSelectedCardIntoView()
+        prefetchPreviewsAroundVisible()
+        needsDisplay = true
+    }
+
+    /// Scrolls the card strip so the selected card is fully visible, with a
+    /// small leading/trailing margin so it doesn't hug the fade edges.
+    private func scrollSelectedCardIntoView() {
+        guard selectedIndex >= 0, selectedIndex < cardRects.count else { return }
+        let cardRect = cardRects[selectedIndex]
+        let margin: CGFloat = 24
+        let visibleMinX = scrollOffset + margin
+        let visibleMaxX = scrollOffset + bounds.width - margin
+        let maxScroll = max(contentWidth - bounds.width, 0)
+        if cardRect.minX < visibleMinX {
+            scrollOffset = max(0, cardRect.minX - margin)
+        } else if cardRect.maxX > visibleMaxX {
+            scrollOffset = min(maxScroll, cardRect.maxX - bounds.width + margin)
+        }
+    }
+
+    private func globalIndexForSelected() -> Int? {
+        guard selectedIndex >= 0, selectedIndex < filteredIndices.count else { return nil }
+        return filteredIndices[selectedIndex]
+    }
+
+    private func activateSelectedForCopy() {
+        guard let idx = globalIndexForSelected() else { return }
+        controller?.copyAndDismiss(index: idx)
+    }
+
+    private func activateSelectedForOpenEditor() {
+        guard let idx = globalIndexForSelected() else { return }
+        controller?.openInEditor(index: idx)
+    }
+
+    private func activateSelectedForQuickLook() {
+        guard let idx = globalIndexForSelected() else { return }
+        controller?.quickLook(index: idx)
+    }
+
+    private func activateSelectedForDelete() {
+        guard let idx = globalIndexForSelected() else { return }
+        // loadEntries (called from deleteEntry) resets selectedIndex via
+        // applyFilter → 0, so arrows keep working after a deletion.
+        controller?.deleteEntry(index: idx)
     }
 }

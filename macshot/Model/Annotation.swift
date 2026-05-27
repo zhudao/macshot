@@ -133,6 +133,7 @@ enum ArrowStyle: Int, CaseIterable {
     case double = 2     // arrowheads at both ends
     case open = 3       // open/unfilled chevron arrowhead
     case tail = 4       // filled arrowhead at end + circle at start
+    case sketchy = 5    // hand-drawn wobbly shaft with open chevron head
 }
 
 class Annotation {
@@ -198,9 +199,15 @@ class Annotation {
     var censorMode: CensorMode = .pixelate
     var textBgColor: NSColor?         // background pill color (nil = no background)
     var textOutlineColor: NSColor?    // text outline/stroke color (nil = no outline)
+    var textGlyphStrokeColor: NSColor? // per-glyph stroke color drawn around each character (nil = none)
     var textAlignment: NSTextAlignment = .left // text alignment within the box
     var fontFamilyName: String?       // font family for text (nil = system default)
     var outlineColor: NSColor?        // shape/arrow/line outline color (nil = no outline)
+    /// Stable per-annotation seed for deterministic procedural variation
+    /// (e.g. the sketchy arrow style's wobble offsets). Seeded on creation,
+    /// preserved across clone/codable so the same arrow renders identically
+    /// across redraws and reloads.
+    var randomSeed: UInt32 = UInt32.random(in: 1...UInt32.max)
 
     init(tool: AnnotationTool, startPoint: NSPoint, endPoint: NSPoint, color: NSColor, strokeWidth: CGFloat) {
         self.tool = tool
@@ -243,9 +250,11 @@ class Annotation {
         c.censorMode = censorMode
         c.textBgColor = textBgColor
         c.textOutlineColor = textOutlineColor
+        c.textGlyphStrokeColor = textGlyphStrokeColor
         c.textAlignment = textAlignment
         c.fontFamilyName = fontFamilyName
         c.outlineColor = outlineColor
+        c.randomSeed = randomSeed
         return c
     }
 
@@ -265,6 +274,7 @@ class Annotation {
         isStrikethrough = src.isStrikethrough
         textBgColor = src.textBgColor
         textOutlineColor = src.textOutlineColor
+        textGlyphStrokeColor = src.textGlyphStrokeColor
         textAlignment = src.textAlignment
         fontFamilyName = src.fontFamilyName
         numberFormat = src.numberFormat
@@ -645,10 +655,10 @@ class Annotation {
             color.withAlphaComponent(1.0).setFill()
 
             // Map raw pressure (0–1) to a usable width range:
-            // - Minimum 30% of stroke width even at lightest touch
+            // - Minimum 20% of stroke width even at lightest touch
             // - Power curve (0.6) compresses the range so light/medium pressure
             //   differences are subtle, heavy pressure stands out
-            let minFraction: CGFloat = 0.3
+            let minFraction: CGFloat = 0.2
             func pressureWidth(_ p: CGFloat) -> CGFloat {
                 let mapped = minFraction + pow(min(max(p, 0), 1), 0.6) * (1.0 - minFraction)
                 return max(width * mapped, 0.5)
@@ -821,6 +831,11 @@ class Annotation {
             drawThickArrow()
             return
         }
+        // Sketchy style is hand-drawn — also a different shape pipeline
+        if arrowStyle == .sketchy {
+            drawSketchyArrow()
+            return
+        }
 
         let pts = arrowReversed ? waypoints.reversed() : waypoints
         guard pts.count >= 2 else { return }
@@ -922,7 +937,7 @@ class Annotation {
                 let h = NSBezierPath(); h.lineWidth = strokeWidth + outlineW * 2
                 h.lineCapStyle = .round; h.lineJoinStyle = .round
                 h.move(to: ep1); h.line(to: lastPt); h.line(to: ep2); h.stroke()
-            case .thick: break
+            case .thick, .sketchy: break  // handled by early returns above
             }
             if arrowStyle == .tail {
                 let cr = NSRect(x: firstPt.x - tailRadius - outlineW, y: firstPt.y - tailRadius - outlineW,
@@ -967,8 +982,8 @@ class Annotation {
             head.line(to: lastPt)
             head.line(to: ep2)
             head.stroke()
-        case .thick:
-            break // handled by early return above
+        case .thick, .sketchy:
+            break // handled by early returns above
         }
 
         // Tail: circle at start
@@ -1010,11 +1025,16 @@ class Annotation {
         }
         let spx = -sin(startAngle), spy = cos(startAngle)
 
-        // Sizing — scale everything down when arrow is short
-        let sizeScale = min(1.0, max(0.2, totalLen / 120))
-        let tailHalf = max(2, strokeWidth * 0.5) * sizeScale
-        let shaftHalf = max(4, strokeWidth * 1.5) * sizeScale
-        let headHalf = shaftHalf * 2.0
+        // Sizing — the arrow's cross-section (shaft + head width) should never
+        // exceed the arrow's length. Scale everything down proportionally.
+        let rawTailHalf = max(2, strokeWidth * 0.5)
+        let rawShaftHalf = max(4, strokeWidth * 1.5)
+        let rawHeadHalf = rawShaftHalf * 2.0
+        let maxCrossSection = rawHeadHalf * 2  // full head width
+        let fitScale = min(1.0, totalLen / max(1, maxCrossSection * 1.5))
+        let tailHalf = rawTailHalf * fitScale
+        let shaftHalf = rawShaftHalf * fitScale
+        let headHalf = rawHeadHalf * fitScale
         let headLen = min(totalLen * 0.35, headHalf * 1.8)
         let r: CGFloat = min(headLen * 0.22, headHalf * 0.3)  // corner rounding
 
@@ -1127,6 +1147,218 @@ class Annotation {
 
         color.setFill()
         path.fill()
+    }
+
+    /// Hand-drawn arrow style. The shaft follows the user's actual line/curve,
+    /// with deterministic wobble and pressure variation. The head is an open
+    /// chevron separated slightly from the shaft so it feels drawn by hand.
+    private func drawSketchyArrow() {
+        let pts = arrowReversed ? waypoints.reversed() : waypoints
+        guard pts.count >= 2 else { return }
+        let firstPt = pts.first!
+        let lastPt = pts.last!
+
+        let totalLen = hasMultiAnchor
+            ? Self.smoothPathLength(pts)
+            : (controlPoint != nil
+                ? Self.approxBezierLength(from: firstPt, cp1: controlPoint!, cp2: controlPoint!, to: lastPt)
+                : hypot(lastPt.x - firstPt.x, lastPt.y - firstPt.y))
+        guard totalLen > 4 else { return }
+
+        func sampleBase(at t: CGFloat) -> (point: NSPoint, tangent: CGVector) {
+            let t = max(0, min(1, t))
+            if hasMultiAnchor {
+                let totalSegments = CGFloat(pts.count - 1)
+                let segF = t * totalSegments
+                let seg = min(Int(segF), pts.count - 2)
+                let lt = segF - CGFloat(seg)
+                let p0 = seg > 0 ? pts[seg - 1] : pts[seg]
+                let p1 = pts[seg]
+                let p2 = pts[seg + 1]
+                let p3 = seg + 2 < pts.count ? pts[seg + 2] : pts[seg + 1]
+                let cp1 = NSPoint(x: p1.x + (p2.x - p0.x) / 6, y: p1.y + (p2.y - p0.y) / 6)
+                let cp2 = NSPoint(x: p2.x - (p3.x - p1.x) / 6, y: p2.y - (p3.y - p1.y) / 6)
+                let u = 1 - lt
+                let x = u*u*u*p1.x + 3*u*u*lt*cp1.x + 3*u*lt*lt*cp2.x + lt*lt*lt*p2.x
+                let y = u*u*u*p1.y + 3*u*u*lt*cp1.y + 3*u*lt*lt*cp2.y + lt*lt*lt*p2.y
+                let tx = 3*u*u*(cp1.x - p1.x) + 6*u*lt*(cp2.x - cp1.x) + 3*lt*lt*(p2.x - cp2.x)
+                let ty = 3*u*u*(cp1.y - p1.y) + 6*u*lt*(cp2.y - cp1.y) + 3*lt*lt*(p2.y - cp2.y)
+                return (NSPoint(x: x, y: y), CGVector(dx: tx, dy: ty))
+            }
+            if let cp = controlPoint {
+                let u = 1 - t
+                let x = u*u*firstPt.x + 2*u*t*cp.x + t*t*lastPt.x
+                let y = u*u*firstPt.y + 2*u*t*cp.y + t*t*lastPt.y
+                let tx = 2*u*(cp.x - firstPt.x) + 2*t*(lastPt.x - cp.x)
+                let ty = 2*u*(cp.y - firstPt.y) + 2*t*(lastPt.y - cp.y)
+                return (NSPoint(x: x, y: y), CGVector(dx: tx, dy: ty))
+            }
+            return (
+                NSPoint(
+                    x: firstPt.x + (lastPt.x - firstPt.x) * t,
+                    y: firstPt.y + (lastPt.y - firstPt.y) * t),
+                CGVector(dx: lastPt.x - firstPt.x, dy: lastPt.y - firstPt.y)
+            )
+        }
+
+        var rng = SketchyRNG(seed: randomSeed)
+        let wobblePhaseA = rng.cgFloat(in: 0...(2 * .pi))
+        let wobblePhaseB = rng.cgFloat(in: 0...(2 * .pi))
+        let pressurePhase = rng.cgFloat(in: 0...(2 * .pi))
+        let wobbleAmp = min(max(strokeWidth * 0.18, 0.45), 1.8)
+        let baseWidth = max(1.2, strokeWidth)
+        let headLen = min(max(baseWidth * 4.3, 13), totalLen * 0.27)
+        let headGap = min(max(baseWidth * 0.28, 1.5), max(2, totalLen * 0.025))
+        let shaftEndLen = max(0, totalLen - headLen - headGap)
+        let headBaseLen = max(0, totalLen - headLen)
+        let steps = max(12, min(140, Int(totalLen / 6)))
+
+        func point(atDistance distance: CGFloat) -> (point: NSPoint, tangent: CGVector) {
+            sampleBase(at: totalLen > 0 ? distance / totalLen : 0)
+        }
+
+        func sketchPoint(distance: CGFloat, pass: Int) -> NSPoint {
+            let sampled = point(atDistance: distance)
+            let tangentLen = max(hypot(sampled.tangent.dx, sampled.tangent.dy), 0.001)
+            let nx = -sampled.tangent.dy / tangentLen
+            let ny = sampled.tangent.dx / tangentLen
+            let progress = totalLen > 0 ? distance / totalLen : 0
+            let taper = pow(sin(progress * .pi), 0.85)
+            let wobble =
+                sin(progress * 8.5 + wobblePhaseA + CGFloat(pass) * 0.63) * wobbleAmp +
+                sin(progress * 19.0 + wobblePhaseB + CGFloat(pass) * 1.19) * wobbleAmp * 0.24
+            return NSPoint(
+                x: sampled.point.x + nx * wobble * taper,
+                y: sampled.point.y + ny * wobble * taper)
+        }
+
+        func strokeSketchLine(color strokeColor: NSColor, extraWidth: CGFloat, pass: Int) {
+            guard shaftEndLen > 2 else { return }
+            strokeColor.setStroke()
+            var prev = sketchPoint(distance: 0, pass: pass)
+            for i in 1...steps {
+                let progress = CGFloat(i) / CGFloat(steps)
+                let distance = shaftEndLen * progress
+                let cur = sketchPoint(distance: distance, pass: pass)
+                let endTaper = 0.92 + 0.08 * sin(progress * .pi)
+                let widthVariation = endTaper * (0.91 + 0.16 * sin(progress * 2.15 * .pi + pressurePhase))
+                let segment = NSBezierPath()
+                segment.lineWidth = baseWidth * widthVariation + extraWidth
+                segment.lineCapStyle = .round
+                segment.lineJoinStyle = .round
+                segment.move(to: prev)
+                segment.line(to: cur)
+                segment.stroke()
+                prev = cur
+            }
+        }
+
+        if let oc = outlineColor {
+            strokeSketchLine(color: oc, extraWidth: 6, pass: 0)
+        }
+        strokeSketchLine(color: color, extraWidth: 0, pass: 0)
+
+        // Sample the shaft tangent at the nose so the head aligns with the line direction.
+        let headDirSample = point(atDistance: totalLen)
+        let tangentLen = max(hypot(headDirSample.tangent.dx, headDirSample.tangent.dy), 0.001)
+        let dir = CGVector(dx: headDirSample.tangent.dx / tangentLen, dy: headDirSample.tangent.dy / tangentLen)
+        let normal = CGVector(dx: -dir.dy, dy: dir.dx)
+        // Nose tends to overshoot the shaft end a little, like a quick pen flick.
+        let noseExtend = rng.cgFloat(in: (headLen * 0.04)...(headLen * 0.14))
+        let noseLateral = rng.cgFloat(in: -headLen * 0.05...headLen * 0.05)
+        let nose = NSPoint(
+            x: lastPt.x + dir.dx * noseExtend + normal.dx * noseLateral,
+            y: lastPt.y + dir.dy * noseExtend + normal.dy * noseLateral)
+
+        // Two chevron legs, deliberately uneven in length, angle, and base spread.
+        // A typical real-life sketched chevron has noticeably different legs.
+        let baseSpread = max(baseWidth * 2.6, 8)
+        let leftLen = headLen * rng.cgFloat(in: 0.92...1.18)
+        let rightLen = headLen * rng.cgFloat(in: 0.78...1.08)
+        let leftSpread = baseSpread * rng.cgFloat(in: 0.95...1.25)
+        let rightSpread = baseSpread * rng.cgFloat(in: 0.85...1.15)
+        // Each leg can tilt a bit off the perfect mirror — adds asymmetry.
+        let leftAngleSkew = rng.cgFloat(in: -0.18...0.18)
+        let rightAngleSkew = rng.cgFloat(in: -0.18...0.18)
+        // The two leg endpoints, splayed off the back of the nose with skew.
+        let leftBase = NSPoint(
+            x: nose.x - dir.dx * leftLen + normal.dx * leftSpread
+                + dir.dx * leftAngleSkew * leftSpread,
+            y: nose.y - dir.dy * leftLen + normal.dy * leftSpread
+                + dir.dy * leftAngleSkew * leftSpread)
+        let rightBase = NSPoint(
+            x: nose.x - dir.dx * rightLen - normal.dx * rightSpread
+                + dir.dx * rightAngleSkew * rightSpread,
+            y: nose.y - dir.dy * rightLen - normal.dy * rightSpread
+                + dir.dy * rightAngleSkew * rightSpread)
+        // Bow magnitude scales with leg length so it's actually visible. Sign is
+        // independent per leg so they don't mirror each other.
+        let leftBow = rng.cgFloat(in: 0.10...0.22) * leftLen
+            * (rng.next() & 1 == 0 ? 1 : -1)
+        let rightBow = rng.cgFloat(in: 0.10...0.22) * rightLen
+            * (rng.next() & 1 == 0 ? 1 : -1)
+        // Bow position along the leg (0.5 = midpoint, biased so the curve peaks
+        // slightly off-center for a more natural stroke).
+        let leftBowPos = rng.cgFloat(in: 0.40...0.62)
+        let rightBowPos = rng.cgFloat(in: 0.40...0.62)
+        // Tiny tangential nudge on the bow control to break the perfect arc shape.
+        let leftBowTan = rng.cgFloat(in: -0.08...0.08) * leftLen
+        let rightBowTan = rng.cgFloat(in: -0.08...0.08) * rightLen
+
+        func drawHeadChevron(color strokeColor: NSColor, width: CGFloat) {
+            strokeColor.setStroke()
+            // Left leg: quadratic bezier with a noticeably-bowed mid control.
+            let lmx = nose.x + (leftBase.x - nose.x) * leftBowPos
+            let lmy = nose.y + (leftBase.y - nose.y) * leftBowPos
+            let leftCtrl = NSPoint(
+                x: lmx + normal.dx * leftBow + dir.dx * leftBowTan,
+                y: lmy + normal.dy * leftBow + dir.dy * leftBowTan)
+            let leftPath = NSBezierPath()
+            leftPath.lineWidth = width
+            leftPath.lineCapStyle = .round
+            leftPath.lineJoinStyle = .round
+            leftPath.move(to: nose)
+            leftPath.curve(to: leftBase, controlPoint1: leftCtrl, controlPoint2: leftCtrl)
+            leftPath.stroke()
+            // Right leg: same idea, independent bow direction.
+            let rmx = nose.x + (rightBase.x - nose.x) * rightBowPos
+            let rmy = nose.y + (rightBase.y - nose.y) * rightBowPos
+            let rightCtrl = NSPoint(
+                x: rmx + normal.dx * rightBow + dir.dx * rightBowTan,
+                y: rmy + normal.dy * rightBow + dir.dy * rightBowTan)
+            let rightPath = NSBezierPath()
+            rightPath.lineWidth = width
+            rightPath.lineCapStyle = .round
+            rightPath.lineJoinStyle = .round
+            rightPath.move(to: nose)
+            rightPath.curve(to: rightBase, controlPoint1: rightCtrl, controlPoint2: rightCtrl)
+            rightPath.stroke()
+        }
+
+        if let oc = outlineColor {
+            drawHeadChevron(color: oc, width: baseWidth + 6)
+        }
+        drawHeadChevron(color: color, width: baseWidth)
+    }
+
+    /// Tiny deterministic PRNG (xorshift32) so sketchy arrows look the same
+    /// across redraws while still varying between instances.
+    private struct SketchyRNG {
+        var state: UInt32
+        init(seed: UInt32) { self.state = seed }
+        mutating func next() -> UInt32 {
+            var x = state
+            x ^= x << 13
+            x ^= x >> 17
+            x ^= x << 5
+            state = x
+            return x
+        }
+        mutating func cgFloat(in range: ClosedRange<CGFloat>) -> CGFloat {
+            let n = CGFloat(next()) / CGFloat(UInt32.max)
+            return range.lowerBound + n * (range.upperBound - range.lowerBound)
+        }
+        mutating func bool() -> Bool { next() & 1 == 0 }
     }
 
     private func drawRectangle(forceFilled: Bool = false) {
@@ -1396,6 +1628,17 @@ class Annotation {
         paraStyle.alignment = textAlignment
         mutable.addAttribute(.paragraphStyle, value: paraStyle, range: range)
 
+        // Per-glyph stroke. NSAttributedString's .strokeWidth is a percentage
+        // of font point size; negative means "fill AND stroke" (positive
+        // would skip the fill, leaving just an outline).
+        if let glyphStroke = textGlyphStrokeColor {
+            mutable.addAttribute(.strokeColor, value: glyphStroke, range: range)
+            mutable.addAttribute(.strokeWidth, value: -6.0, range: range)
+        } else {
+            mutable.removeAttribute(.strokeColor, range: range)
+            mutable.removeAttribute(.strokeWidth, range: range)
+        }
+
         attributedText = mutable
 
         // Calculate new size using the current textDrawRect width
@@ -1643,7 +1886,7 @@ class Annotation {
             let pixelBlock = 8
             let tinyW = max(1, cgImage.width / pixelBlock)
             let tinyH = max(1, cgImage.height / pixelBlock)
-            let cs = CGColorSpaceCreateDeviceRGB()
+            let cs = cgImage.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!
             let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
 
             guard let ctx1 = CGContext(data: nil, width: tinyW, height: tinyH,
@@ -1794,7 +2037,7 @@ class Annotation {
         // Render the fill: for each pixel, blend horizontal interpolation (left↔right)
         // with vertical interpolation (bottom↔top)
         let outW = iw, outH = ih
-        let cs = CGColorSpaceCreateDeviceRGB()
+        let cs = CGColorSpace(name: CGColorSpace.sRGB)!
         let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
         guard let ctx = CGContext(data: nil, width: outW, height: outH,
                                   bitsPerComponent: 8, bytesPerRow: outW * 4,
@@ -1931,7 +2174,7 @@ class Annotation {
             NSColor.white.withAlphaComponent(0.95).cgColor,
             NSColor(white: 0.7, alpha: 0.85).cgColor,
         ] as CFArray
-        return CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0.0, 1.0])
+        return CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB)!, colors: colors, locations: [0.0, 1.0])
     }()
 
     private func drawLoupe(in context: NSGraphicsContext) {
@@ -2065,4 +2308,3 @@ class Annotation {
         attrStr.draw(with: textRect, options: [.usesLineFragmentOrigin, .usesFontLeading])
     }
 }
-

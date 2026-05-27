@@ -10,20 +10,27 @@ final class VideoEditorWindowController: NSObject, NSWindowDelegate {
     private var editorView: VideoEditorView?
     private static var activeControllers: [VideoEditorWindowController] = []
 
-    static func open(url: URL) {
+    /// Open a video in the editor.
+    /// - Parameters:
+    ///   - url: File URL to the video.
+    ///   - deleteOnClose: If true (default) the editor deletes the file when
+    ///     the window closes — appropriate for temporary recordings. Pass
+    ///     `false` when opening a user-owned file so we don't delete their
+    ///     source.
+    static func open(url: URL, deleteOnClose: Bool = true) {
         let controller = VideoEditorWindowController()
-        controller.show(url: url)
+        controller.show(url: url, deleteOnClose: deleteOnClose)
         activeControllers.append(controller)
         if activeControllers.count == 1 {
             NSApp.setActivationPolicy(.regular)
         }
     }
 
-    private func show(url: URL) {
+    private func show(url: URL, deleteOnClose: Bool = true) {
         guard let screen = NSScreen.main else { return }
 
         // Size window to fit content, capped at 60% of screen
-        let controlsH: CGFloat = 140
+        let controlsH: CGFloat = 172
         let maxW = screen.frame.width * 0.6
         let maxH = screen.frame.height * 0.6
         var contentW: CGFloat = 800
@@ -43,7 +50,7 @@ final class VideoEditorWindowController: NSObject, NSWindowDelegate {
 
         // Scale down to fit screen, maintaining aspect ratio
         let scale = min(1.0, min(maxW / contentW, (maxH - controlsH) / contentH))
-        let winW = max(820, contentW * scale)
+        let winW = max(880, contentW * scale)
         let winH = max(400, contentH * scale + controlsH)
         let winX = screen.frame.midX - winW / 2
         let winY = screen.frame.midY - winH / 2
@@ -53,14 +60,18 @@ final class VideoEditorWindowController: NSObject, NSWindowDelegate {
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false
         )
-        win.title = L("macshot Video Editor")
-        win.minSize = NSSize(width: 820, height: 400)
+        // Prefix with the source filename so multiple editor windows are
+        // distinguishable in the Dock menu and Window menu.
+        win.title = "\(url.deletingPathExtension().lastPathComponent) — \(L("macshot Video Editor"))"
+        win.minSize = NSSize(width: 880, height: 400)
         win.isReleasedWhenClosed = false
         win.delegate = self
         win.collectionBehavior = [.fullScreenAuxiliary]
         win.backgroundColor = ToolbarLayout.bgColor
 
-        let view = VideoEditorView(frame: NSRect(x: 0, y: 0, width: winW, height: winH), videoURL: url)
+        let view = VideoEditorView(frame: NSRect(x: 0, y: 0, width: winW, height: winH),
+                                    videoURL: url,
+                                    deleteOnClose: deleteOnClose)
         win.contentView = view
 
         win.makeKeyAndOrderFront(nil)
@@ -87,9 +98,13 @@ final class VideoEditorWindowController: NSObject, NSWindowDelegate {
 private final class VideoEditorView: NSView {
 
     private let videoURL: URL
+    /// If true, the underlying file is deleted on close (recording tmp path).
+    /// Set to false when opening a user-owned source file via "Open Video...".
+    private let deleteOnClose: Bool
     private let isGIF: Bool
     private var player: AVPlayer?
     private var playerView: AVPlayerView?
+    private var effectsOverlay: EffectsPreviewOverlayView?
     private var gifImageView: NSImageView?
     private var asset: AVAsset?
     private var duration: Double = 0
@@ -111,6 +126,18 @@ private final class VideoEditorView: NSView {
     private var thumbnailsGenerating: Bool = false
     private var lastThumbnailWidth: CGFloat = 0
 
+    /// Pre-composited timeline thumbnail strip. Built once when thumbnails
+    /// or the timeline width changes; reused on every draw so playback
+    /// doesn't loop through N individual NSImage.draw(in:) calls 30 times
+    /// per second. Nil → strip needs rebuilding (or no thumbnails yet).
+    private var thumbnailStrip: NSImage?
+    private var thumbnailStripWidth: CGFloat = 0
+
+    /// Last drawn playhead x-position in view coords. Used by
+    /// `invalidatePlayheadArea` to invalidate only the stripe spanning
+    /// old→new so AppKit can clip the expensive thumbnail-strip redraw.
+    private var lastDrawnPlayheadX: CGFloat?
+
     // Format toggle (MP4 vs GIF export)
     private var exportAsGIF: Bool = false
     private var formatToggleRect: NSRect = .zero
@@ -122,6 +149,44 @@ private final class VideoEditorView: NSView {
     private var originalHeight: Int = 0
     private var exportScale: CGFloat = 1.0  // 1.0 = original, 0.5 = 50%, etc.
     private var dimensionsBtnRect: NSRect = .zero
+
+    // Export quality (controls bitrate when re-encoding for MP4 export)
+    private var exportQuality: VideoQuality = .high
+    private var qualityBtnRect: NSRect = .zero
+
+    // Effects band (zoom + censor segments) lives in its own NSView, hosted
+    // inside an NSScrollView so it can overflow vertically when many segments
+    // stack onto separate rows. The parent editor observes mutations via the
+    // band's delegate and rebuilds the video composition / preview overlay.
+    private var effectsBand: EffectsBandView?
+    private var effectsScrollView: NSScrollView?
+    private var effectsBandHeightConstraint: NSLayoutConstraint?
+    private var playerBottomConstraint: NSLayoutConstraint?
+
+    // Convenience accessors so call sites don't have to guard the optional.
+    private var zoomSegments: [VideoZoomSegment] { effectsBand?.zoomSegments ?? [] }
+    private var censorSegments: [VideoCensorSegment] { effectsBand?.censorSegments ?? [] }
+    private var cutSegments: [VideoCutSegment] { effectsBand?.cutSegments ?? [] }
+    private var textSegments: [VideoTextSegment] { effectsBand?.textSegments ?? [] }
+    private var selectedSegmentID: UUID? { effectsBand?.selectedSegmentID }
+
+    // Cached rasterized text overlays. Keyed by segment id; the value carries
+    // the spec used to produce the cached CGImage so we can invalidate when
+    // any visible property changes. Lives on the editor (main actor) and is
+    // snapshotted into the compositor instruction at composition-build time.
+    private var textRasterCache: [UUID: (spec: VideoTextRasterizer.Spec, image: CGImage)] = [:]
+
+    // Inline text-editor state for "Edit Text…". Lives on the editor view so
+    // we can place a borderless NSTextView over the player at the same rect
+    // the EffectsPreviewOverlayView is showing.
+    private var inlineTextEditor: NSTextView?
+    private var inlineTextEditorScrollView: NSScrollView?
+    private var inlineTextEditingSegmentID: UUID?
+    private var pausedForTextEdit: Bool = false
+
+    // NSColorPanel binding state for the "Custom…" color menu action.
+    fileprivate var textColorPickerSegmentID: UUID?
+    fileprivate var textColorPickerIsBackground: Bool = false
 
     // Button rects
     private var playBtnRect: NSRect = .zero
@@ -139,11 +204,52 @@ private final class VideoEditorView: NSView {
     private var statusTimer: Timer?
 
     // Layout
-    private let controlsH: CGFloat = 140
     private let timelinePad: CGFloat = 20
+    /// Row height inside the effects band, kept in sync with EffectsBandView.
+    /// Also serves as a layout primitive for the scroll view's visible height.
+    private let effectsRowStride: CGFloat = 22 + 2
+    /// Number of rows visible without scrolling inside the effects scroll view.
+    /// Beyond this the scroll view scrolls vertically.
+    private let effectsVisibleRowCount: Int = 4
 
-    init(frame: NSRect, videoURL: URL) {
+    // Vertical layout of the controls band (bottom-up):
+    //   [buttons 12→40]          fixed 48pt
+    //   [effects scroll view]    variable (rowCount × rowStride - 2, capped)
+    //   [gap 8pt]                8
+    //   [trim timeline]          36
+    //   [time labels]            18
+    //   [top pad]                12
+    //
+    // Time labels sit ABOVE the trim bar so they don't collide with the
+    // effects band's "Click to add effects" hint that sits directly
+    // above the bottom buttons row.
+    private let buttonsAreaH: CGFloat = 48
+    private let labelsRowH: CGFloat = 18
+    private let trimBarH: CGFloat = 36
+    private let topPadH: CGFloat = 12
+    /// Gap between the effects scroll view (top) and the trim bar (bottom).
+    /// Sized to fit the playhead circle which sits below the trim bar in
+    /// this layout (circle is 8pt diameter with 2pt breathing room).
+    private let scrollToLabelsGap: CGFloat = 14
+
+    /// Total height of the controls band at the bottom of the editor,
+    /// dynamic because the effects scroll view grows with row count.
+    private var controlsH: CGFloat {
+        return buttonsAreaH
+             + effectsScrollViewHeight(forRowCount: currentEffectRowCount)
+             + scrollToLabelsGap
+             + trimBarH
+             + labelsAboveTrimGap
+             + labelsRowH
+             + topPadH
+    }
+
+    /// Live row count; the delegate callback updates it and triggers layout.
+    private var currentEffectRowCount: Int = 1
+
+    init(frame: NSRect, videoURL: URL, deleteOnClose: Bool = true) {
         self.videoURL = videoURL
+        self.deleteOnClose = deleteOnClose
         self.isGIF = videoURL.pathExtension.lowercased() == "gif"
         super.init(frame: frame)
 
@@ -166,27 +272,42 @@ private final class VideoEditorView: NSView {
         let asset = AVAsset(url: videoURL)
         self.asset = asset
 
-        // Store original pixel dimensions
-        if let track = asset.tracks(withMediaType: .video).first {
-            let size = track.naturalSize.applying(track.preferredTransform)
-            originalWidth = Int(abs(size.width))
-            originalHeight = Int(abs(size.height))
-        }
-
+        // AVAsset for a freshly-finalized recording can return an empty
+        // `tracks` array from the synchronous accessor before the moov atom
+        // has been parsed. Build everything (dimensions, duration, player,
+        // effects-composition trackID) only after `.tracks` is loaded —
+        // otherwise the live-preview compositor caches a stale trackID and
+        // `sourceFrame(byTrackID:)` returns nil → effects silently no-op.
         Task {
-            // Use video track duration (asset duration can be wrong when audio track is present)
+            let videoTrack: AVAssetTrack? = await {
+                if let tracks = try? await asset.load(.tracks) {
+                    return tracks.first(where: { $0.mediaType == .video })
+                }
+                return asset.tracks(withMediaType: .video).first
+            }()
+
             let seconds: Double
-            if let videoTrack = asset.tracks(withMediaType: .video).first {
+            if let videoTrack = videoTrack {
                 seconds = CMTimeGetSeconds(videoTrack.timeRange.duration)
             } else if let dur = try? await asset.load(.duration) {
                 seconds = CMTimeGetSeconds(dur)
             } else {
                 seconds = 0
             }
+
+            let pixelSize: CGSize? = videoTrack.map {
+                $0.naturalSize.applying($0.preferredTransform)
+            }
+
             await MainActor.run {
+                if let size = pixelSize {
+                    self.originalWidth = Int(abs(size.width))
+                    self.originalHeight = Int(abs(size.height))
+                }
                 self.duration = max(seconds, 0.1)
                 self.trimEnd = self.duration
                 self.buildPlayerView()
+                self.effectsBand?.duration = self.duration
             }
         }
     }
@@ -243,13 +364,17 @@ private final class VideoEditorView: NSView {
             if self.gifPlaybackTime >= self.trimEnd {
                 self.gifPlaybackTime = self.trimStart
             }
-            self.needsDisplay = true
+            self.invalidatePlayheadArea()
         }
         needsDisplay = true
     }
 
     private func buildPlayerView() {
-        let item = AVPlayerItem(url: videoURL)
+        // Use the same AVAsset instance the rest of the editor uses so that
+        // track IDs our composition references line up with what AVPlayer is
+        // decoding.
+        let playerAsset = asset ?? AVAsset(url: videoURL)
+        let item = AVPlayerItem(asset: playerAsset)
         let player = AVPlayer(playerItem: item)
         self.player = player
 
@@ -259,24 +384,103 @@ private final class VideoEditorView: NSView {
         pv.translatesAutoresizingMaskIntoConstraints = false
         addSubview(pv)
 
+        let playerBottomC = pv.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -controlsH)
         NSLayoutConstraint.activate([
             pv.topAnchor.constraint(equalTo: topAnchor),
             pv.leadingAnchor.constraint(equalTo: leadingAnchor),
             pv.trailingAnchor.constraint(equalTo: trailingAnchor),
-            pv.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -controlsH),
+            playerBottomC,
         ])
         playerView = pv
+        self.playerBottomConstraint = playerBottomC
+
+        // Overlay for interactive effect editing — sits on top of the player
+        // view and pins to the same edges so it tracks window resizes.
+        let overlay = EffectsPreviewOverlayView()
+        overlay.translatesAutoresizingMaskIntoConstraints = false
+        // Video natural size (orientation-applied). Needed so the overlay can
+        // compute the letterboxed video rect inside its bounds.
+        if let track = playerAsset.tracks(withMediaType: .video).first {
+            let size = track.naturalSize.applying(track.preferredTransform)
+            overlay.videoSize = CGSize(width: abs(size.width), height: abs(size.height))
+        }
+        overlay.onChange = { [weak self] newRect in
+            self?.overlayRectChanged(newRect)
+        }
+        overlay.onTextEditRequested = { [weak self] viewRect in
+            guard let self = self,
+                  let id = self.selectedSegmentID,
+                  self.textSegments.contains(where: { $0.id == id }) else { return }
+            self.beginInlineTextEdit(segmentID: id, atViewRect: viewRect, hostView: overlay)
+        }
+        addSubview(overlay)
+        NSLayoutConstraint.activate([
+            overlay.topAnchor.constraint(equalTo: pv.topAnchor),
+            overlay.leadingAnchor.constraint(equalTo: pv.leadingAnchor),
+            overlay.trailingAnchor.constraint(equalTo: pv.trailingAnchor),
+            overlay.bottomAnchor.constraint(equalTo: pv.bottomAnchor),
+        ])
+        effectsOverlay = overlay
+
+        // Effects band — inside a scroll view so many stacked rows don't push
+        // the timeline off-screen. Height grows up to
+        // `effectsVisibleRowCount` rows, beyond which the scroll view
+        // scrolls.
+        let scrollView = NSScrollView()
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.scrollerStyle = .overlay
+        scrollView.drawsBackground = false
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+        scrollView.horizontalScrollElasticity = .none
+        let band = EffectsBandView()
+        band.translatesAutoresizingMaskIntoConstraints = false
+        band.delegate = self
+        scrollView.documentView = band
+        addSubview(scrollView)
+
+        let scrollHeight = effectsScrollViewHeight(forRowCount: 1)
+        let heightC = scrollView.heightAnchor.constraint(equalToConstant: scrollHeight)
+        heightC.priority = .required
+        NSLayoutConstraint.activate([
+            // Inset 4pt less than the trim timeline so effect-pill handles
+            // that poke past the pill edge (at startTime=0 or
+            // endTime=duration) still have room to render fully. The
+            // band itself re-inserts a matching 4pt horizontalInset so
+            // pills visually align with the thumbnails above.
+            scrollView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: timelinePad - 4),
+            scrollView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -(timelinePad - 4)),
+            // Scroll view sits directly above the buttons row (y=48 from parent bottom).
+            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -buttonsAreaH),
+            heightC,
+            // Document view (band) width matches the scroll view's visible
+            // width; height is driven by intrinsicContentSize.
+            band.widthAnchor.constraint(equalTo: scrollView.widthAnchor),
+        ])
+        self.effectsScrollView = scrollView
+        self.effectsBand = band
+        self.effectsBandHeightConstraint = heightC
 
         // Observe playback position
         timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(value: 1, timescale: 30), queue: .main) { [weak self] time in
             guard let self = self, !self.isDraggingScrubber else { return }
-            let t = CMTimeGetSeconds(time)
+            // The player's clock may be the cut-stripped composition clock;
+            // map it back to the source asset clock before comparing with
+            // trim markers (which are in source time).
+            let t = self.mapPreviewClockToSourceTime(CMTimeGetSeconds(time))
             if t >= self.trimEnd {
                 self.player?.pause()
-                self.player?.seek(to: CMTime(seconds: self.trimStart, preferredTimescale: 600),
+                let target = self.mapSourceTimeToPreviewClock(self.trimStart)
+                self.player?.seek(to: CMTime(seconds: target, preferredTimescale: 600),
                                   toleranceBefore: .zero, toleranceAfter: .zero)
             }
-            self.needsDisplay = true
+            // Narrow invalidation — just the playhead stripe. The rest of
+            // the controls band is static during playback and AppKit's
+            // dirty-rect clipping skips their fills. This drops per-frame
+            // draw cost from ~30ms (60 thumbnail redraws) to <1ms.
+            self.invalidatePlayheadArea()
         }
 
         generateThumbnails()
@@ -318,11 +522,35 @@ private final class VideoEditorView: NSView {
             if idx >= count {
                 DispatchQueue.main.async {
                     self?.thumbnailImages = images
+                    self?.thumbnailStrip = nil           // force rebuild in drawTimeline
                     self?.thumbnailsGenerating = false
                     self?.needsDisplay = true
                 }
             }
         }
+    }
+
+    /// Build (or rebuild) the pre-composited thumbnail strip cache. Cheap
+    /// to call on every draw — returns immediately if the cache is already
+    /// valid for `width`. Called from drawTimeline before the strip is
+    /// drawn.
+    private func rebuildThumbnailStripIfNeeded(width: CGFloat, height: CGFloat) {
+        guard !thumbnailImages.isEmpty, width > 0, height > 0 else { return }
+        if thumbnailStrip != nil, abs(thumbnailStripWidth - width) < 0.5 { return }
+
+        let size = NSSize(width: width, height: height)
+        let strip = NSImage(size: size)
+        strip.lockFocus()
+        let count = thumbnailImages.count
+        for (i, img) in thumbnailImages.enumerated() {
+            let x0 = floor(CGFloat(i) * width / CGFloat(count))
+            let x1 = ceil(CGFloat(i + 1) * width / CGFloat(count))
+            let r = NSRect(x: x0, y: 0, width: x1 - x0, height: height)
+            img.draw(in: r, from: .zero, operation: .sourceOver, fraction: 1.0)
+        }
+        strip.unlockFocus()
+        thumbnailStrip = strip
+        thumbnailStripWidth = width
     }
 
     func cleanup() {
@@ -332,15 +560,21 @@ private final class VideoEditorView: NSView {
         playerView?.player = nil
         gifPlaybackTimer?.invalidate()
         gifPlaybackTimer = nil
-        // Clean up temp recording file
-        try? FileManager.default.removeItem(at: videoURL)
+        // Delete only if the file was a temporary recording we own. User-
+        // opened files must never be deleted — that would be data loss.
+        if deleteOnClose {
+            try? FileManager.default.removeItem(at: videoURL)
+        }
     }
 
     private var currentPlaybackTime: Double {
         if isGIF {
             return gifPlaybackTime
         } else {
-            return CMTimeGetSeconds(player?.currentTime() ?? .zero)
+            // Always report in source-asset time so the playhead, thumbnails
+            // and trim UI agree regardless of whether the preview is
+            // composition-backed (cuts present) or not.
+            return mapPreviewClockToSourceTime(CMTimeGetSeconds(player?.currentTime() ?? .zero))
         }
     }
 
@@ -358,40 +592,59 @@ private final class VideoEditorView: NSView {
 
         guard duration > 0 else { return }
 
+        // Skip draw sections whose Y-band doesn't intersect the dirty rect.
+        // AppKit already clips final drawing to `dirtyRect`, but each
+        // `drawX()` method still executes its setup — SF-Symbol
+        // rasterization in `drawIconButton` alone costs ~25ms/call. When
+        // the 30Hz playhead observer only invalidates the trim-bar band,
+        // the bottom buttons row doesn't need to run at all.
+        let buttonsBand = NSRect(x: 0, y: 0, width: bounds.width, height: buttonsAreaH)
+
         drawTimeline()
-        drawButtons()
+        if dirtyRect.intersects(buttonsBand) {
+            drawButtons()
+        }
         drawTimeLabels()
         if let msg = statusMessage { drawStatus(msg) }
     }
 
+
     private func drawTimeline() {
         let tlX = timelinePad
         let tlW = bounds.width - timelinePad * 2
-        let tlY: CGFloat = 55
-        let tlH: CGFloat = 36
+        // Trim timeline bottom sits above the time-labels row, which sits
+        // above the effects scroll view. All three adjust upward as the
+        // scroll view grows to show more rows.
+        let tlH: CGFloat = trimBarH
+        let scrollH = effectsScrollViewHeight(forRowCount: currentEffectRowCount)
+        // Trim bar sits directly above the effects scroll view (with just
+        // the `scrollToLabelsGap` for breathing room). Time labels now sit
+        // ABOVE the trim bar — see `timeLabelY`.
+        let tlY: CGFloat = buttonsAreaH + scrollH + scrollToLabelsGap
         timelineRect = NSRect(x: tlX, y: tlY, width: tlW, height: tlH)
 
         // Regenerate thumbnails if width changed significantly
         if abs(tlW - lastThumbnailWidth) > 40 && !thumbnailsGenerating && asset != nil {
             generateThumbnails()
         }
+        // Invalidate the cached strip if width changed even slightly so the
+        // resampled strip stays aligned with the timeline.
+        if abs(thumbnailStripWidth - tlW) > 0.5 { thumbnailStrip = nil }
+        rebuildThumbnailStripIfNeeded(width: tlW, height: tlH)
 
         // Track background with rounded clip
         let trackPath = NSBezierPath(roundedRect: timelineRect, xRadius: 5, yRadius: 5)
         ToolbarLayout.iconColor.withAlphaComponent(0.06).setFill()
         trackPath.fill()
 
-        // Draw thumbnails — use floor/ceil to avoid sub-pixel gaps between tiles
+        // Blit the pre-composited thumbnail strip in one draw call. Drawing
+        // each thumbnail individually per frame was ~100ms/s during
+        // playback; caching brings it to <5ms/s with the same visual.
         NSGraphicsContext.saveGraphicsState()
         trackPath.addClip()
-        if !thumbnailImages.isEmpty {
-            let count = thumbnailImages.count
-            for (i, img) in thumbnailImages.enumerated() {
-                let x0 = floor(tlX + CGFloat(i) * tlW / CGFloat(count))
-                let x1 = ceil(tlX + CGFloat(i + 1) * tlW / CGFloat(count))
-                let r = NSRect(x: x0, y: tlY, width: x1 - x0, height: tlH)
-                img.draw(in: r, from: .zero, operation: .sourceOver, fraction: 0.5)
-            }
+        if let strip = thumbnailStrip {
+            strip.draw(in: NSRect(x: tlX, y: tlY, width: tlW, height: tlH),
+                       from: .zero, operation: .sourceOver, fraction: 0.5)
         }
 
         // Dim untrimmed regions
@@ -403,6 +656,43 @@ private final class VideoEditorView: NSView {
         }
         if endX < tlX + tlW {
             NSRect(x: endX, y: tlY, width: tlX + tlW - endX, height: tlH).fill()
+        }
+
+        // Subtle teal tint for speed ranges — just enough to signal them on
+        // the trim bar. The full pill lives on the effects band below.
+        for speed in speedSegments where speed.endTime > speed.startTime {
+            let sx0 = tlX + CGFloat(max(0, min(duration, speed.startTime)) / duration) * tlW
+            let sx1 = tlX + CGFloat(max(0, min(duration, speed.endTime)) / duration) * tlW
+            let rect = NSRect(x: sx0, y: tlY, width: max(1, sx1 - sx0), height: tlH)
+            NSColor(calibratedRed: 0.10, green: 0.55, blue: 0.50, alpha: 0.28).setFill()
+            rect.fill()
+        }
+
+        // Draw striped cut overlays inside the trim region — they signal
+        // ranges that will be removed on export. Clipped by the track path so
+        // overlays never leak past the rounded edges.
+        for cut in cutSegments where cut.endTime > cut.startTime {
+            let cx0 = tlX + CGFloat(max(0, min(duration, cut.startTime)) / duration) * tlW
+            let cx1 = tlX + CGFloat(max(0, min(duration, cut.endTime)) / duration) * tlW
+            let cutRect = NSRect(x: cx0, y: tlY, width: max(1, cx1 - cx0), height: tlH)
+            // Dark-red tint over the thumbnails.
+            NSColor(calibratedRed: 0.50, green: 0.05, blue: 0.08, alpha: 0.55).setFill()
+            cutRect.fill()
+            // Diagonal hatching.
+            NSGraphicsContext.saveGraphicsState()
+            NSBezierPath(rect: cutRect).addClip()
+            NSColor.white.withAlphaComponent(0.22).setStroke()
+            let stripes = NSBezierPath()
+            stripes.lineWidth = 1
+            let step: CGFloat = 6
+            var x = cutRect.minX - cutRect.height
+            while x < cutRect.maxX + cutRect.height {
+                stripes.move(to: NSPoint(x: x, y: cutRect.minY))
+                stripes.line(to: NSPoint(x: x + cutRect.height, y: cutRect.maxY))
+                x += step
+            }
+            stripes.stroke()
+            NSGraphicsContext.restoreGraphicsState()
         }
 
         // Trim border highlight
@@ -427,22 +717,75 @@ private final class VideoEditorView: NSView {
         NSBezierPath(roundedRect: endHandleRect, xRadius: 3, yRadius: 3).fill()
         drawHandleGrip(in: endHandleRect)
 
-        // Playhead
+        // Playhead — line spans the full trim timeline. Circle sits BELOW
+        // the trim bar in the gap between it and the effects scroll view.
+        // (Previously the circle sat above, but the time-labels row lives
+        // there now — a circle at x = timelinePad would collide with the
+        // current-time label at t = 0.)
         if player != nil || isGIF {
             let currentTime = currentPlaybackTime
             let playheadX = max(tlX, min(tlX + tlW, tlX + CGFloat(currentTime / duration) * tlW))
+            // Remember the last drawn position so `invalidatePlayheadArea`
+            // can clip invalidation to just the old + new stripe instead
+            // of marking the whole view dirty.
+            lastDrawnPlayheadX = playheadX
 
-            // Playhead line with subtle shadow
             ToolbarLayout.iconColor.withAlphaComponent(0.9).setFill()
-            let playheadRect = NSRect(x: playheadX - 1, y: tlY - 2, width: 2, height: tlH + 4)
+            let playheadRect = NSRect(x: playheadX - 1, y: tlY - 2,
+                                       width: 2, height: tlH + 4)
             NSBezierPath(roundedRect: playheadRect, xRadius: 1, yRadius: 1).fill()
 
-            // Playhead circle
-            let circleR: CGFloat = 5
-            let circleX = max(tlX + circleR, min(tlX + tlW - circleR, playheadX))
+            let circleR: CGFloat = 4
+            let circleX = playheadX
+            // Circle sits centered in the gap below the trim bar, so it's
+            // visually "stuck to" the trim bar's bottom edge.
+            let circleY = tlY - circleR * 2 - 2
             ToolbarLayout.iconColor.setFill()
-            NSBezierPath(ovalIn: NSRect(x: circleX - circleR, y: tlY + tlH + 2, width: circleR * 2, height: circleR * 2)).fill()
+            NSBezierPath(ovalIn: NSRect(x: circleX - circleR,
+                                          y: circleY,
+                                          width: circleR * 2,
+                                          height: circleR * 2)).fill()
         }
+    }
+
+    /// Mark only the stripe containing the old and new playhead positions
+    /// + the left current-time label area as dirty. Lets AppKit clip the
+    /// draw so the expensive button-rendering (SF Symbols, NSImage blits)
+    /// at the bottom of the controls area stays out of the per-frame path.
+    ///
+    /// Used in place of `self.needsDisplay = true` from the 30Hz playback
+    /// observers. Other mutations (trim drag, segment edits, window
+    /// resize) still use `needsDisplay = true` for full redraws.
+    private func invalidatePlayheadArea() {
+        let tlX = timelinePad
+        let tlW = bounds.width - timelinePad * 2
+        let newX = max(tlX, min(tlX + tlW, tlX + CGFloat(currentPlaybackTime / max(duration, 0.0001)) * tlW))
+        let oldX = lastDrawnPlayheadX ?? newX
+
+        // Y-range that actually needs to redraw when the playhead moves:
+        // from the playhead circle (just below the trim bar) up through
+        // the time-labels row. Explicitly excludes the bottom buttons
+        // (y=0→buttonsAreaH) so SF-Symbol rendering stays off the 30Hz
+        // path — that was eating ~1s/10s on the main thread.
+        let scrollH = effectsScrollViewHeight(forRowCount: currentEffectRowCount)
+        let tlY = buttonsAreaH + scrollH + scrollToLabelsGap
+        let playheadBandMinY = tlY - 12                                              // below trim bar (circle + padding)
+        let playheadBandMaxY = tlY + trimBarH + labelsAboveTrimGap + labelsRowH + 2  // through label row
+
+        // 1) The playhead stripe (line + circle + trim bar content around it).
+        //    Generous padding so the 8pt circle and 2pt line land fully inside.
+        let pad: CGFloat = 12
+        let stripeMinX = min(oldX, newX) - pad
+        let stripeMaxX = max(oldX, newX) + pad
+        setNeedsDisplay(NSRect(x: stripeMinX, y: playheadBandMinY,
+                                width: stripeMaxX - stripeMinX,
+                                height: playheadBandMaxY - playheadBandMinY))
+
+        // 2) The left time label (shows current playback time, which changes
+        //    every frame). Same vertical band — not the full controls height.
+        setNeedsDisplay(NSRect(x: 0, y: playheadBandMinY,
+                                width: tlX + 100,
+                                height: playheadBandMaxY - playheadBandMinY))
     }
 
     private func drawHandleGrip(in rect: NSRect) {
@@ -564,17 +907,42 @@ private final class VideoEditorView: NSView {
                 }
             }
 
-            // Estimated export size — show when trim, scale, or format change would affect output
+            // Quality dropdown (only meaningful when exporting as MP4)
+            qualityBtnRect = .zero
+            if !exportAsGIF && x < maxLeftX {
+                let qualAttrs: [NSAttributedString.Key: Any] = [
+                    .font: NSFont.systemFont(ofSize: 10, weight: .medium),
+                    .foregroundColor: ToolbarLayout.iconColor.withAlphaComponent(exportQuality != .high ? 0.7 : 0.4),
+                ]
+                let qualStr = "  ·  \(exportQuality.displayName) ▼" as NSString
+                let qualSize = qualStr.size(withAttributes: qualAttrs)
+                let qualBtnW = qualSize.width + 8
+                if x + qualBtnW < maxLeftX {
+                    qualityBtnRect = NSRect(x: x, y: btnY, width: qualBtnW, height: btnH)
+                    qualStr.draw(at: NSPoint(x: x + 4, y: btnY + (btnH - qualSize.height) / 2), withAttributes: qualAttrs)
+                    x += qualBtnW
+                }
+            }
+
+            // Estimated export size — show when trim, scale, quality, or format change would affect output
             let trimRatio = duration > 0 ? (trimEnd - trimStart) / duration : 1.0
             let scaleRatio = exportScale * exportScale  // pixels scale quadratically
-            let willChange = trimRatio < 0.99 || scaleRatio < 0.99 || exportAsGIF
+            // Quality multiplier on output bitrate (low ~0.33, medium ~0.62, high ~1.0)
+            let qualityRatio: Double = {
+                switch exportQuality {
+                case .low:    return 0.33
+                case .medium: return 0.62
+                case .high:   return 1.0
+                }
+            }()
+            let willChange = trimRatio < 0.99 || scaleRatio < 0.99 || qualityRatio < 0.99 || exportAsGIF
             if willChange && sourceFileSize > 0 && x < maxLeftX {
                 let estimated: Int64
                 if exportAsGIF {
                     let gifFPSRatio = min(15.0, fpsValue) / max(fpsValue, 1.0)
                     estimated = Int64(Double(sourceFileSize) * trimRatio * scaleRatio * 3.0 * Double(gifFPSRatio))
                 } else {
-                    estimated = Int64(Double(sourceFileSize) * trimRatio * scaleRatio)
+                    estimated = Int64(Double(sourceFileSize) * trimRatio * scaleRatio * qualityRatio)
                 }
                 let estStr = "  ·  ~\(ByteCountFormatter.string(fromByteCount: estimated, countStyle: .file))" as NSString
                 let estAttrs: [NSAttributedString.Key: Any] = [
@@ -759,10 +1127,44 @@ private final class VideoEditorView: NSView {
         str.draw(at: NSPoint(x: startX + iconSize + iconGap, y: rect.midY - textSize.height / 2), withAttributes: attrs)
     }
 
+    /// Time labels sit ABOVE the trim bar (AppKit y=up), so the status
+    /// banner "Copied to clipboard!" and the left/right time readouts
+    /// don't collide with the effects band's cursor-follow "+" hint or
+    /// the "Click to add effects" empty-state that sits just above the
+    /// bottom buttons.
+    /// Extra vertical gap between the trim bar top and the time labels,
+    /// purely for visual breathing room. Without it the labels hug the
+    /// top edge of the trim rectangle and look cramped.
+    private let labelsAboveTrimGap: CGFloat = 4
+
+    private var timeLabelY: CGFloat {
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium),
+        ]
+        let sampleHeight = ("0" as NSString).size(withAttributes: attrs).height
+        let scrollH = effectsScrollViewHeight(forRowCount: currentEffectRowCount)
+        // Bottom of the labels row sits slightly above the top of the
+        // trim bar — `labelsAboveTrimGap` gives the text a little
+        // breathing room so it doesn't look pasted onto the bar.
+        let labelsRowBottom = buttonsAreaH + scrollH + scrollToLabelsGap + trimBarH + labelsAboveTrimGap
+        return labelsRowBottom + (labelsRowH - sampleHeight) / 2
+    }
+
     private func drawTimeLabels() {
         let currentTime = currentPlaybackTime
-        let trimDuration = trimEnd - trimStart
-        let labelY = timelineRect.maxY + 14
+        // Show the actual output duration so users see the effect of cuts
+        // and speed on the final export. Falls back to raw trim span when
+        // neither is present (same value, cheaper to compute).
+        let trimDuration: Double = {
+            if cutSegments.isEmpty && speedSegments.isEmpty && freezeSegments.isEmpty {
+                return trimEnd - trimStart
+            }
+            let kept = VideoCuts.keptRanges(trimStart: trimStart, trimEnd: trimEnd, cuts: cutSegments)
+            let pieces = VideoSpeeds.pieces(keptRanges: kept,
+                                              speeds: speedSegments,
+                                              freezes: freezeSegments)
+            return VideoSpeeds.totalCompositionDuration(pieces)
+        }()
 
         let leftStr = formatTime(currentTime) as NSString
         let rightStr = String(format: L("%@ selected"), formatTime(trimDuration)) as NSString
@@ -771,10 +1173,10 @@ private final class VideoEditorView: NSView {
             .foregroundColor: ToolbarLayout.iconColor.withAlphaComponent(0.5),
         ]
 
-        leftStr.draw(at: NSPoint(x: timelinePad, y: labelY), withAttributes: attrs)
+        leftStr.draw(at: NSPoint(x: timelinePad, y: timeLabelY), withAttributes: attrs)
 
         let rightSize = rightStr.size(withAttributes: attrs)
-        rightStr.draw(at: NSPoint(x: bounds.width - timelinePad - rightSize.width, y: labelY), withAttributes: attrs)
+        rightStr.draw(at: NSPoint(x: bounds.width - timelinePad - rightSize.width, y: timeLabelY), withAttributes: attrs)
     }
 
     private func drawStatus(_ message: String) {
@@ -785,8 +1187,7 @@ private final class VideoEditorView: NSView {
         ]
         let str = message as NSString
         let size = str.size(withAttributes: attrs)
-        let labelY = timelineRect.maxY + 14
-        str.draw(at: NSPoint(x: bounds.midX - size.width / 2, y: labelY), withAttributes: attrs)
+        str.draw(at: NSPoint(x: bounds.midX - size.width / 2, y: timeLabelY), withAttributes: attrs)
     }
 
     private func formatTime(_ seconds: Double) -> String {
@@ -798,12 +1199,117 @@ private final class VideoEditorView: NSView {
 
     // MARK: - Mouse
 
+    // MARK: - Effects preview overlay
+
+    /// Full sync: update the overlay's selection AND seek the preview to a
+    /// time that makes editing intuitive. Call only when selection changes,
+    /// not during a drag (seeking mid-drag stutters the decoder).
+    private func updateEffectsOverlay() {
+        refreshOverlaySelection()
+        // Seek only on selection change, based on the newly-selected segment.
+        if let id = selectedSegmentID {
+            if let seg = zoomSegments.first(where: { $0.id == id }) {
+                seekPreview(to: max(0, seg.startTime - 0.05))
+            } else if let seg = censorSegments.first(where: { $0.id == id }) {
+                seekPreview(to: (seg.startTime + seg.endTime) / 2)
+            } else if let seg = textSegments.first(where: { $0.id == id }) {
+                seekPreview(to: (seg.startTime + seg.endTime) / 2)
+            }
+        }
+    }
+
+    /// Light sync: update the overlay's displayed rect + kind without seeking.
+    /// Safe to call during an active drag or when a segment's properties
+    /// change without the selection itself moving.
+    private func refreshOverlaySelection() {
+        guard let overlay = effectsOverlay else { return }
+        if let id = selectedSegmentID {
+            if let seg = zoomSegments.first(where: { $0.id == id }) {
+                overlay.selection = .init(kind: .zoom, rect: rectForZoom(seg))
+                return
+            }
+            if let seg = censorSegments.first(where: { $0.id == id }) {
+                overlay.selection = .init(kind: .censor(seg.style), rect: seg.rect)
+                return
+            }
+            if let seg = textSegments.first(where: { $0.id == id }) {
+                overlay.selection = .init(kind: .text, rect: seg.rect)
+                return
+            }
+        }
+        overlay.selection = nil
+    }
+
+    private func seekPreview(to t: Double) {
+        guard let player = player else { return }
+        if player.rate > 0 { player.pause() }
+        let target = mapSourceTimeToPreviewClock(t)
+        player.seek(to: CMTime(seconds: target, preferredTimescale: 600),
+                     toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
+    /// Translate a source-asset time to the current player item's clock.
+    /// When preview is composition-backed (cuts present) this collapses the
+    /// cut ranges; otherwise it's a pass-through.
+    fileprivate func mapSourceTimeToPreviewClock(_ sourceTime: Double) -> Double {
+        guard previewUsesComposition else { return sourceTime }
+        return previewSourceTimeToComp(sourceTime, against: player?.currentItem?.asset ?? asset ?? AVAsset(url: videoURL))
+    }
+
+    /// Inverse of `mapSourceTimeToPreviewClock`. Callers that read the
+    /// current player time but want it in source-asset terms (e.g. to draw
+    /// the playhead) should go through this.
+    fileprivate func mapPreviewClockToSourceTime(_ previewTime: Double) -> Double {
+        guard previewUsesComposition else { return previewTime }
+        return previewCompTimeToSource(previewTime)
+    }
+
+    /// Representation of a zoom segment as a normalized rect. Shape is always
+    /// a square of side 1/zoomLevel, centered on segment.center. Used only
+    /// for display in the overlay — the underlying model still uses
+    /// (center, zoomLevel) as its source of truth.
+    private func rectForZoom(_ seg: VideoZoomSegment) -> CGRect {
+        let side = 1.0 / max(seg.zoomLevel, 0.0001)
+        let x = seg.center.x - side / 2
+        let y = seg.center.y - side / 2
+        return CGRect(x: x, y: y, width: side, height: side)
+    }
+
+    /// Called when the overlay view reports a new normalized rect.
+    /// Dispatches based on the currently-selected segment type.
+    private func overlayRectChanged(_ rect: CGRect) {
+        guard let id = selectedSegmentID else { return }
+        savedURL = nil
+        if let seg = zoomSegments.first(where: { $0.id == id }) {
+            // Derive zoom level from rect size, clamp to model's range. Use
+            // the longer side so the entire rect fits inside the zoom window.
+            let side = max(rect.width, rect.height, 0.0001)
+            let desiredZoom = 1.0 / side
+            seg.zoomLevel = max(VideoZoomSegment.minZoom,
+                                 min(VideoZoomSegment.maxZoom, desiredZoom))
+            // Center on the rect midpoint
+            seg.center = CGPoint(x: rect.midX, y: rect.midY)
+        } else if let seg = censorSegments.first(where: { $0.id == id }) {
+            seg.rect = VideoCensorSegment.clampedRect(rect)
+        } else if let seg = textSegments.first(where: { $0.id == id }) {
+            seg.rect = VideoTextSegment.clampedRect(rect)
+            // Rect resize changes pixel size → invalidate raster cache for
+            // this segment so the next composition rebuild re-rasterizes
+            // at the new size. Drop only this entry; keep other texts cached.
+            textRasterCache.removeValue(forKey: id)
+        }
+        applyZoomTransformForCurrentTime()
+        effectsBand?.refreshAfterParentEdit()
+        needsDisplay = true
+    }
+
     override var acceptsFirstResponder: Bool { true }
+
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
 
-        // Trim handles
+        // Trim handles (higher priority than zoom segments)
         let handleHitW: CGFloat = 16
         let startX = timelineRect.minX + CGFloat(trimStart / duration) * timelineRect.width
         let endX = timelineRect.minX + CGFloat(trimEnd / duration) * timelineRect.width
@@ -817,10 +1323,15 @@ private final class VideoEditorView: NSView {
 
         // Scrub timeline
         if timelineRect.insetBy(dx: 0, dy: -10).contains(point) {
+            // Clicking the trim bar deselects any effect segment
+            effectsBand?.clearSelection()
             isDraggingScrubber = true
             scrubTo(point: point)
             return
         }
+
+        // Clicking outside the timeline also deselects
+        effectsBand?.clearSelection()
 
         // Format toggle
         if formatMP4Rect.contains(point) && exportAsGIF {
@@ -833,6 +1344,11 @@ private final class VideoEditorView: NSView {
         // Dimensions dropdown
         if dimensionsBtnRect.contains(point) && originalWidth > 0 {
             showDimensionsMenu(); return
+        }
+
+        // Quality dropdown
+        if qualityBtnRect.contains(point) {
+            showQualityMenu(); return
         }
 
         // Buttons
@@ -851,15 +1367,18 @@ private final class VideoEditorView: NSView {
 
     override func mouseDragged(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        let t = max(0, min(duration, Double((point.x - timelineRect.minX) / timelineRect.width) * duration))
 
         if isDraggingStart {
+            let t = max(0, min(duration, Double((point.x - timelineRect.minX) / timelineRect.width) * duration))
             trimStart = min(t, trimEnd - 0.1)
-            player?.seek(to: CMTime(seconds: trimStart, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+            let target = mapSourceTimeToPreviewClock(trimStart)
+            player?.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
             needsDisplay = true
         } else if isDraggingEnd {
+            let t = max(0, min(duration, Double((point.x - timelineRect.minX) / timelineRect.width) * duration))
             trimEnd = max(t, trimStart + 0.1)
-            player?.seek(to: CMTime(seconds: trimEnd, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+            let target = mapSourceTimeToPreviewClock(trimEnd)
+            player?.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
             needsDisplay = true
         } else if isDraggingScrubber {
             scrubTo(point: point)
@@ -874,7 +1393,8 @@ private final class VideoEditorView: NSView {
 
     private func scrubTo(point: NSPoint) {
         let t = max(trimStart, min(trimEnd, Double((point.x - timelineRect.minX) / timelineRect.width) * duration))
-        player?.seek(to: CMTime(seconds: t, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        let target = mapSourceTimeToPreviewClock(t)
+        player?.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
         needsDisplay = true
     }
 
@@ -900,22 +1420,25 @@ private final class VideoEditorView: NSView {
         if player.rate > 0 {
             player.pause()
         } else {
-            let current = CMTimeGetSeconds(player.currentTime())
+            let current = mapPreviewClockToSourceTime(CMTimeGetSeconds(player.currentTime()))
             if current < trimStart || current >= trimEnd - 0.1 {
-                player.seek(to: CMTime(seconds: trimStart, preferredTimescale: 600))
+                let target = mapSourceTimeToPreviewClock(trimStart)
+                player.seek(to: CMTime(seconds: target, preferredTimescale: 600))
             }
             player.play()
         }
         needsDisplay = true
     }
 
-    private func showStatus(_ msg: String, isError: Bool = false) {
+    private func showStatus(_ msg: String, isError: Bool = false, persist: Bool = false) {
         statusMessage = msg
         statusIsError = isError
         statusTimer?.invalidate()
-        statusTimer = Timer.scheduledTimer(withTimeInterval: isError ? 6 : 3, repeats: false) { [weak self] _ in
-            self?.statusMessage = nil
-            self?.needsDisplay = true
+        if !persist {
+            statusTimer = Timer.scheduledTimer(withTimeInterval: isError ? 6 : 3, repeats: false) { [weak self] _ in
+                self?.statusMessage = nil
+                self?.needsDisplay = true
+            }
         }
         needsDisplay = true
     }
@@ -974,51 +1497,48 @@ private final class VideoEditorView: NSView {
 
     private func exportSession(asset: AVAsset, timeRange: CMTimeRange, outputURL: URL) -> AVAssetExportSession? {
         let needsScale = exportScale < 0.999
+        let hasEffects = !zoomSegments.isEmpty || !censorSegments.isEmpty || !textSegments.isEmpty
+        // Freezes force the custom compositor on — AVAssetExportSession fails
+        // on the extreme scaleTimeRange a freeze bakes into the composition
+        // track (1/600s source slice stretched to ~1s = 600× scale).
+        let hasFreeze = !freezeSegments.isEmpty
 
-        // Build a composition when we need to strip audio or scale
-        let composition = AVMutableComposition()
-        guard let videoTrack = asset.tracks(withMediaType: .video).first,
-              let compositionVideoTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else { return nil }
-        try? compositionVideoTrack.insertTimeRange(timeRange, of: videoTrack, at: .zero)
+        guard let processed = buildProcessedComposition(
+            srcAsset: asset,
+            trimStartSec: CMTimeGetSeconds(timeRange.start),
+            trimEndSec: CMTimeGetSeconds(timeRange.end),
+            includeAudio: !isMuted
+        ) else { return nil }
 
-        // Include audio unless muted
-        if !isMuted {
-            for audioTrack in asset.tracks(withMediaType: .audio) {
-                if let compAudio = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
-                    try? compAudio.insertTimeRange(timeRange, of: audioTrack, at: .zero)
-                }
-            }
-        }
-
-        let presetName = needsScale ? AVAssetExportPresetHighestQuality : AVAssetExportPresetHighestQuality
-        guard let session = AVAssetExportSession(asset: composition, presetName: presetName) else { return nil }
+        guard let session = AVAssetExportSession(asset: processed.composition, presetName: AVAssetExportPresetHighestQuality) else { return nil }
         session.outputURL = outputURL
         session.outputFileType = .mp4
 
-        // Apply scale via video composition
-        if needsScale {
-            let naturalSize = videoTrack.naturalSize.applying(videoTrack.preferredTransform)
-            let w = abs(naturalSize.width)
-            let h = abs(naturalSize.height)
-            // Round to even for codec compatibility
-            let scaledW = CGFloat((Int(w * exportScale) / 2) * 2)
-            let scaledH = CGFloat((Int(h * exportScale) / 2) * 2)
-
-            let instruction = AVMutableVideoCompositionInstruction()
-            instruction.timeRange = CMTimeRange(start: .zero, duration: composition.duration)
-            let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: compositionVideoTrack)
-
-            // Apply the original transform (handles rotation) scaled down
-            var transform = videoTrack.preferredTransform
-            transform = transform.concatenating(CGAffineTransform(scaleX: exportScale, y: exportScale))
-            layerInstruction.setTransform(transform, at: .zero)
-            instruction.layerInstructions = [layerInstruction]
-
-            let videoComposition = AVMutableVideoComposition()
-            videoComposition.instructions = [instruction]
-            videoComposition.renderSize = CGSize(width: scaledW, height: scaledH)
-            videoComposition.frameDuration = CMTime(value: 1, timescale: CMTimeScale(videoTrack.nominalFrameRate))
-            session.videoComposition = videoComposition
+        if needsScale || hasEffects || hasFreeze {
+            guard let srcVideoTrack = asset.tracks(withMediaType: .video).first else { return session }
+            let naturalSize = srcVideoTrack.naturalSize.applying(srcVideoTrack.preferredTransform)
+            let (scaledW, scaledH) = VideoEncodingSettings.evenDimensions(
+                width: abs(naturalSize.width) * exportScale,
+                height: abs(naturalSize.height) * exportScale
+            )
+            let renderSize = CGSize(width: scaledW, height: scaledH)
+            if hasEffects || hasFreeze {
+                session.videoComposition = buildEffectsVideoComposition(
+                    for: processed.composition,
+                    videoTrack: processed.videoTrack,
+                    renderSize: renderSize,
+                    timeMap: processed.timeMap,
+                    timeRangeDuration: processed.duration
+                )
+            } else {
+                // Scale-only: no custom compositor needed, use a plain layer
+                // instruction with a single transform.
+                session.videoComposition = buildScaleOnlyComposition(
+                    videoTrack: processed.videoTrack,
+                    renderSize: renderSize,
+                    totalDuration: processed.duration
+                )
+            }
         }
 
         return session
@@ -1105,9 +1625,35 @@ private final class VideoEditorView: NSView {
         needsDisplay = true
     }
 
+    private func showQualityMenu() {
+        let menu = NSMenu()
+        let options: [(VideoQuality, String)] = [
+            (.high,   L("High")),
+            (.medium, L("Medium")),
+            (.low,    L("Low")),
+        ]
+        for (q, label) in options {
+            let item = NSMenuItem(title: label, action: #selector(qualitySelected(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = q.rawValue
+            item.state = (q == exportQuality) ? .on : .off
+            menu.addItem(item)
+        }
+        let pos = NSPoint(x: qualityBtnRect.minX, y: qualityBtnRect.maxY)
+        menu.popUp(positioning: nil, at: pos, in: self)
+    }
+
+    @objc private func qualitySelected(_ sender: NSMenuItem) {
+        if let raw = sender.representedObject as? String, let q = VideoQuality(rawValue: raw) {
+            exportQuality = q
+            savedURL = nil
+            needsDisplay = true
+        }
+    }
+
     private func convertToGIF(destURL: URL, completion: ((Bool) -> Void)? = nil) {
         guard let asset = asset else { completion?(false); return }
-        showStatus(L("Converting to GIF…"))
+        showStatus(L("Processing GIF…"), persist: true)
 
         let startTime = CMTime(seconds: trimStart, preferredTimescale: 600)
         let endTime = CMTime(seconds: trimEnd, preferredTimescale: 600)
@@ -1115,60 +1661,134 @@ private final class VideoEditorView: NSView {
         // GIF capped at 15fps
         let gifFPS = min(15, asset.tracks(withMediaType: .video).first.map { Int($0.nominalFrameRate.rounded()) } ?? 15)
         let scale = exportScale
+        let hasEffects = !zoomSegments.isEmpty || !censorSegments.isEmpty || !textSegments.isEmpty
 
-        Task.detached(priority: .userInitiated) { [weak self] in
+        // Build the effects-composition pipeline on the main thread before jumping
+        // to background so the video composition builder sees our current state.
+        var readerAsset: AVAsset = asset
+        var readerVideoTrackOpt: AVAssetTrack? = asset.tracks(withMediaType: .video).first
+        var readerTimeRange: CMTimeRange = timeRange
+        var readerVideoComposition: AVMutableVideoComposition?
+        var readerOutW = 0
+        var readerOutH = 0
+        if hasEffects, let vt = readerVideoTrackOpt {
+            if let processed = buildProcessedComposition(
+                srcAsset: asset,
+                trimStartSec: CMTimeGetSeconds(timeRange.start),
+                trimEndSec: CMTimeGetSeconds(timeRange.end),
+                // GIF has no audio — skip the audio comp tracks entirely.
+                includeAudio: false
+            ) {
+                let natSize = vt.naturalSize.applying(vt.preferredTransform)
+                let (outW, outH) = VideoEncodingSettings.evenDimensions(
+                    width: abs(natSize.width) * scale,
+                    height: abs(natSize.height) * scale
+                )
+                readerOutW = outW
+                readerOutH = outH
+                readerAsset = processed.composition
+                readerVideoTrackOpt = processed.videoTrack
+                readerTimeRange = CMTimeRange(start: .zero, duration: processed.composition.duration)
+                readerVideoComposition = buildEffectsVideoComposition(
+                    for: processed.composition,
+                    videoTrack: processed.videoTrack,
+                    renderSize: CGSize(width: outW, height: outH),
+                    timeMap: processed.timeMap,
+                    timeRangeDuration: processed.duration
+                )
+            }
+        }
+
+        DispatchQueue.global(qos: .background).async { [weak self] in
             do {
-                let reader = try AVAssetReader(asset: asset)
-                guard let videoTrack = asset.tracks(withMediaType: .video).first else {
-                    await MainActor.run {
+                let reader = try AVAssetReader(asset: readerAsset)
+                guard let videoTrack = readerVideoTrackOpt else {
+                    DispatchQueue.main.async {
                         self?.showStatus(L("No video track found"), isError: true)
                         completion?(false)
                     }
                     return
                 }
 
-                // If scaling, request scaled output directly from AVAssetReaderTrackOutput
-                var outputSettings: [String: Any] = [
-                    kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
-                ]
-                if scale < 0.999 {
-                    let natSize = videoTrack.naturalSize.applying(videoTrack.preferredTransform)
-                    let w = Int(abs(natSize.width) * scale) / 2 * 2
-                    let h = Int(abs(natSize.height) * scale) / 2 * 2
-                    outputSettings[kCVPixelBufferWidthKey as String] = w
-                    outputSettings[kCVPixelBufferHeightKey as String] = h
+                let readerOutput: AVAssetReaderOutput
+                if let comp = readerVideoComposition {
+                    let cOut = AVAssetReaderVideoCompositionOutput(
+                        videoTracks: [videoTrack],
+                        videoSettings: [
+                            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                            kCVPixelBufferWidthKey as String: readerOutW,
+                            kCVPixelBufferHeightKey as String: readerOutH,
+                        ]
+                    )
+                    cOut.videoComposition = comp
+                    cOut.alwaysCopiesSampleData = false
+                    readerOutput = cOut
+                } else {
+                    var outputSettings: [String: Any] = [
+                        kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+                    ]
+                    if scale < 0.999 {
+                        let natSize = videoTrack.naturalSize.applying(videoTrack.preferredTransform)
+                        let w = Int(abs(natSize.width) * scale) / 2 * 2
+                        let h = Int(abs(natSize.height) * scale) / 2 * 2
+                        outputSettings[kCVPixelBufferWidthKey as String] = w
+                        outputSettings[kCVPixelBufferHeightKey as String] = h
+                    }
+                    let tOut = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: outputSettings)
+                    tOut.alwaysCopiesSampleData = false
+                    readerOutput = tOut
                 }
-
-                let trackOutput = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: outputSettings)
-                trackOutput.alwaysCopiesSampleData = false
-                reader.timeRange = timeRange
-                reader.add(trackOutput)
+                reader.timeRange = readerTimeRange
+                reader.add(readerOutput)
 
                 let tmpURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".gif")
                 let sourceFPS = Int(videoTrack.nominalFrameRate.rounded())
                 let encoder = GIFEncoder(url: tmpURL, fps: gifFPS, sourceFPS: max(sourceFPS, gifFPS))
                 reader.startReading()
 
+                let durationSec = CMTimeGetSeconds(readerTimeRange.duration)
+                let estimatedFrames = max(1, Int(durationSec * Double(sourceFPS)))
+                var framesRead = 0
+                var lastReportedPct = -1
+
                 while reader.status == .reading {
-                    if let sampleBuffer = trackOutput.copyNextSampleBuffer(),
-                       let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
-                        encoder.addFrame(pixelBuffer)
+                    autoreleasepool {
+                        if let sampleBuffer = readerOutput.copyNextSampleBuffer(),
+                           let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
+                            encoder.addFrame(pixelBuffer)
+                            framesRead += 1
+                        }
+                    }
+                    // Update progress on main thread (reading = 0–50%, finalize = 50–100%)
+                    let pct = min(50, framesRead * 50 / estimatedFrames)
+                    if pct != lastReportedPct {
+                        lastReportedPct = pct
+                        DispatchQueue.main.async {
+                            self?.showStatus(String(format: L("Processing GIF…") + " %d%%", pct), persist: true)
+                        }
                     }
                 }
+
+                DispatchQueue.main.async {
+                    self?.showStatus(L("Processing GIF…") + " 50%", persist: true)
+                }
                 encoder.finish()
+                DispatchQueue.main.async {
+                    self?.showStatus(L("Processing GIF…") + " 100%", persist: true)
+                }
 
                 // Move to destination
                 try? FileManager.default.removeItem(at: destURL)
                 try FileManager.default.moveItem(at: tmpURL, to: destURL)
 
-                await MainActor.run {
+                DispatchQueue.main.async {
                     self?.savedURL = destURL
                     self?.showStatus(String(format: L("Saved to %@"), destURL.lastPathComponent))
                     self?.needsDisplay = true
                     completion?(true)
                 }
             } catch {
-                await MainActor.run {
+                DispatchQueue.main.async {
                     self?.showStatus(L("GIF conversion failed"), isError: true)
                     completion?(false)
                 }
@@ -1179,7 +1799,12 @@ private final class VideoEditorView: NSView {
     private func saveToDestination(_ destURL: URL, dirURL: URL?) {
         let needsTrim = trimStart > 0.01 || (duration - trimEnd) > 0.01
         let needsScale = exportScale < 0.999
-        let needsExport = needsTrim || isMuted || needsScale
+        let needsRecompress = exportQuality != .high
+        let needsEffects = !zoomSegments.isEmpty || !censorSegments.isEmpty || !textSegments.isEmpty
+        let needsCuts = !cutSegments.isEmpty
+        let needsSpeed = !speedSegments.isEmpty
+        let needsFreeze = !freezeSegments.isEmpty
+        let needsExport = needsTrim || isMuted || needsScale || needsRecompress || needsEffects || needsCuts || needsSpeed || needsFreeze
 
         if !needsExport {
             // No processing needed — copy temp file to destination
@@ -1204,35 +1829,253 @@ private final class VideoEditorView: NSView {
         guard let asset = asset else { return }
         showStatus(L("Exporting..."))
 
-        // Export to a temp file first, then move to destination
         let tmpURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".\(videoURL.pathExtension)")
         let startTime = CMTime(seconds: trimStart, preferredTimescale: 600)
         let endTime = CMTime(seconds: trimEnd, preferredTimescale: 600)
         let timeRange = CMTimeRange(start: startTime, end: endTime)
 
-        guard let session = exportSession(asset: asset, timeRange: timeRange, outputURL: tmpURL) else {
-            showStatus(L("Export failed"), isError: true)
+        let onCompletion: (Bool) -> Void = { [weak self] success in
+            guard let self = self else { return }
+            if success {
+                try? FileManager.default.removeItem(at: destURL)
+                do {
+                    try FileManager.default.moveItem(at: tmpURL, to: destURL)
+                    self.savedURL = destURL
+                    if let dirURL = dirURL { SaveDirectoryAccess.stopAccessing(url: dirURL) }
+                    self.showStatus(String(format: L("Saved to %@"), destURL.lastPathComponent))
+                    self.needsDisplay = true
+                } catch {
+                    self.showStatus(L("Save failed"), isError: true)
+                }
+            } else {
+                self.showStatus(L("Export failed"), isError: true)
+                try? FileManager.default.removeItem(at: tmpURL)
+            }
+        }
+
+        if needsRecompress {
+            reencodeExport(asset: asset, timeRange: timeRange, outputURL: tmpURL, completion: onCompletion)
+        } else {
+            guard let session = exportSession(asset: asset, timeRange: timeRange, outputURL: tmpURL) else {
+                showStatus(L("Export failed"), isError: true)
+                return
+            }
+            Task {
+                await session.export()
+                await MainActor.run { onCompletion(session.status == .completed) }
+            }
+        }
+    }
+
+    /// Re-encode pipeline with explicit bitrate control via AVAssetReader/Writer.
+    /// Used when the user selects a non-High quality preset so the bitrate
+    /// actually takes effect (AVAssetExportSession presets hardcode bitrate).
+    private func reencodeExport(asset: AVAsset, timeRange: CMTimeRange, outputURL: URL, completion: @escaping (Bool) -> Void) {
+        guard let videoTrack = asset.tracks(withMediaType: .video).first else {
+            completion(false)
             return
         }
 
-        Task {
-            await session.export()
-            await MainActor.run {
-                if session.status == .completed {
-                    try? FileManager.default.removeItem(at: destURL)
-                    do {
-                        try FileManager.default.moveItem(at: tmpURL, to: destURL)
-                        self.savedURL = destURL
-                        if let dirURL = dirURL { SaveDirectoryAccess.stopAccessing(url: dirURL) }
-                        self.showStatus(String(format: L("Saved to %@"), destURL.lastPathComponent))
-                        self.needsDisplay = true
-                    } catch {
-                        self.showStatus(L("Save failed"), isError: true)
-                    }
-                } else {
-                    self.showStatus(L("Export failed"), isError: true)
-                    try? FileManager.default.removeItem(at: tmpURL)
+        let natSize = videoTrack.naturalSize.applying(videoTrack.preferredTransform)
+        let srcW = abs(natSize.width)
+        let srcH = abs(natSize.height)
+        let (outW, outH) = VideoEncodingSettings.evenDimensions(width: srcW * exportScale, height: srcH * exportScale)
+        let srcFPS = Int(videoTrack.nominalFrameRate.rounded())
+        let fps = max(srcFPS, 1)
+
+        let includeAudio = !isMuted
+        let srcAudioTracks = asset.tracks(withMediaType: .audio)
+        let hasEffects = !zoomSegments.isEmpty || !censorSegments.isEmpty || !textSegments.isEmpty
+        let hasCuts = !cutSegments.isEmpty
+        let hasSpeed = !speedSegments.isEmpty
+        let hasFreeze = !freezeSegments.isEmpty
+
+        // When effects OR cuts OR speed OR freeze exist we must route
+        // through a composition so cuts skip frames, speed/freeze scale
+        // the clock, and the compositor applies zoom + censor. Otherwise
+        // we read raw scaled frames directly from the source track and
+        // pull audio straight from the original asset.
+        //
+        // Freezes additionally require the custom compositor: the reader's
+        // native handling of extreme scaleTimeRange (1/600s slice → 1s)
+        // doesn't reliably duplicate frames across the stretched window,
+        // so we drive frame generation via the compositor's time map.
+        let readerAsset: AVAsset
+        let readerVideoTrack: AVAssetTrack
+        let readerAudioTracks: [AVAssetTrack]
+        let readerTimeRange: CMTimeRange
+        let readerComposition: AVMutableVideoComposition?
+        if hasEffects || hasCuts || hasSpeed || hasFreeze {
+            guard let processed = buildProcessedComposition(
+                srcAsset: asset,
+                trimStartSec: CMTimeGetSeconds(timeRange.start),
+                trimEndSec: CMTimeGetSeconds(timeRange.end),
+                includeAudio: includeAudio
+            ) else {
+                completion(false); return
+            }
+            readerAsset = processed.composition
+            readerVideoTrack = processed.videoTrack
+            readerAudioTracks = processed.audioTracks
+            readerTimeRange = CMTimeRange(start: .zero, duration: processed.composition.duration)
+            if hasEffects || hasFreeze {
+                readerComposition = buildEffectsVideoComposition(
+                    for: processed.composition,
+                    videoTrack: processed.videoTrack,
+                    renderSize: CGSize(width: outW, height: outH),
+                    timeMap: processed.timeMap,
+                    timeRangeDuration: processed.duration
+                )
+            } else {
+                readerComposition = nil
+            }
+        } else {
+            readerAsset = asset
+            readerVideoTrack = videoTrack
+            readerAudioTracks = srcAudioTracks
+            readerTimeRange = timeRange
+            readerComposition = nil
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { completion(false); return }
+            do {
+                try? FileManager.default.removeItem(at: outputURL)
+                let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
+                let videoSettings = VideoEncodingSettings.outputSettings(
+                    width: outW, height: outH, fps: fps,
+                    codec: .h264, quality: self.exportQuality
+                )
+                let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
+                videoInput.expectsMediaDataInRealTime = false
+                // Orientation: the video composition path already produces upright
+                // render-size frames, so don't re-apply preferredTransform.
+                if readerComposition == nil {
+                    videoInput.transform = videoTrack.preferredTransform
                 }
+                guard writer.canAdd(videoInput) else { completion(false); return }
+                writer.add(videoInput)
+
+                let reader = try AVAssetReader(asset: readerAsset)
+                reader.timeRange = readerTimeRange
+
+                // Video output: either composition output (zoom path) or direct
+                // track output (scale-only path).
+                let videoOutput: AVAssetReaderOutput
+                if let comp = readerComposition {
+                    let cOut = AVAssetReaderVideoCompositionOutput(
+                        videoTracks: [readerVideoTrack],
+                        videoSettings: [
+                            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                        ]
+                    )
+                    cOut.videoComposition = comp
+                    cOut.alwaysCopiesSampleData = false
+                    videoOutput = cOut
+                } else {
+                    var readerOutputSettings: [String: Any] = [
+                        kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                    ]
+                    if self.exportScale < 0.999 {
+                        readerOutputSettings[kCVPixelBufferWidthKey as String] = outW
+                        readerOutputSettings[kCVPixelBufferHeightKey as String] = outH
+                    }
+                    let tOut = AVAssetReaderTrackOutput(track: readerVideoTrack, outputSettings: readerOutputSettings)
+                    tOut.alwaysCopiesSampleData = false
+                    videoOutput = tOut
+                }
+                guard reader.canAdd(videoOutput) else { completion(false); return }
+                reader.add(videoOutput)
+
+                var audioInputs: [AVAssetWriterInput] = []
+                var audioOutputs: [AVAssetReaderTrackOutput] = []
+                if includeAudio {
+                    for track in readerAudioTracks {
+                        let audioSettings: [String: Any] = [
+                            AVFormatIDKey: kAudioFormatMPEG4AAC,
+                            AVSampleRateKey: 48000,
+                            AVNumberOfChannelsKey: 2,
+                            AVEncoderBitRateKey: 128_000,
+                        ]
+                        let input = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+                        input.expectsMediaDataInRealTime = false
+                        if writer.canAdd(input) { writer.add(input); audioInputs.append(input) }
+
+                        let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
+                            AVFormatIDKey: kAudioFormatLinearPCM,
+                            AVLinearPCMBitDepthKey: 16,
+                            AVLinearPCMIsFloatKey: false,
+                            AVLinearPCMIsBigEndianKey: false,
+                            AVLinearPCMIsNonInterleaved: false,
+                        ])
+                        output.alwaysCopiesSampleData = false
+                        if reader.canAdd(output) { reader.add(output); audioOutputs.append(output) }
+                    }
+                }
+
+                guard reader.startReading() else { completion(false); return }
+                guard writer.startWriting() else { completion(false); return }
+                writer.startSession(atSourceTime: .zero)
+
+                let group = DispatchGroup()
+                let videoQueue = DispatchQueue(label: "macshot.export.video")
+                let audioQueue = DispatchQueue(label: "macshot.export.audio")
+
+                // Pump video
+                group.enter()
+                videoInput.requestMediaDataWhenReady(on: videoQueue) {
+                    while videoInput.isReadyForMoreMediaData {
+                        guard reader.status == .reading,
+                              let sample = videoOutput.copyNextSampleBuffer() else {
+                            videoInput.markAsFinished()
+                            group.leave()
+                            return
+                        }
+                        // Shift PTS so the output starts at t=0
+                        let pts = CMSampleBufferGetPresentationTimeStamp(sample)
+                        let shifted = CMTimeSubtract(pts, readerTimeRange.start)
+                        if let retimed = sample.retimed(presentationTime: shifted) {
+                            if !videoInput.append(retimed) {
+                                videoInput.markAsFinished()
+                                group.leave()
+                                return
+                            }
+                        }
+                    }
+                }
+
+                // Pump audio (each track independently)
+                for (input, output) in zip(audioInputs, audioOutputs) {
+                    group.enter()
+                    input.requestMediaDataWhenReady(on: audioQueue) {
+                        while input.isReadyForMoreMediaData {
+                            guard reader.status == .reading,
+                                  let sample = output.copyNextSampleBuffer() else {
+                                input.markAsFinished()
+                                group.leave()
+                                return
+                            }
+                            let pts = CMSampleBufferGetPresentationTimeStamp(sample)
+                            let shifted = CMTimeSubtract(pts, readerTimeRange.start)
+                            if let retimed = sample.retimed(presentationTime: shifted) {
+                                if !input.append(retimed) {
+                                    input.markAsFinished()
+                                    group.leave()
+                                    return
+                                }
+                            }
+                        }
+                    }
+                }
+
+                group.notify(queue: .global(qos: .userInitiated)) {
+                    writer.finishWriting {
+                        let ok = (writer.status == .completed) && (reader.status != .failed)
+                        DispatchQueue.main.async { completion(ok) }
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async { completion(false) }
             }
         }
     }
@@ -1286,7 +2129,11 @@ private final class VideoEditorView: NSView {
         }
 
         let needsTrim = trimStart > 0.01 || (duration - trimEnd) > 0.01
-        let needsExport = needsTrim || isMuted
+        let needsEffects = !zoomSegments.isEmpty || !censorSegments.isEmpty || !textSegments.isEmpty
+        let needsCuts = !cutSegments.isEmpty
+        let needsSpeed = !speedSegments.isEmpty
+        let needsFreeze = !freezeSegments.isEmpty
+        let needsExport = needsTrim || isMuted || needsEffects || needsCuts || needsSpeed || needsFreeze
 
         if !needsExport {
             uploadFileURL(videoURL, false)
@@ -1325,8 +2172,523 @@ private final class VideoEditorView: NSView {
         case 124: // Right arrow — step forward one frame
             stepFrame(forward: true)
         default:
+            // Segment-related keys (Delete, +/-) are handled by EffectsBandView
+            // when it's first responder; fall through here.
             super.keyDown(with: event)
         }
+    }
+
+
+    /// Rebuild the AVPlayerItem's videoComposition so live playback reflects
+    /// the current zoom + censor segments. Also used when editing segments
+    /// during playback — AVPlayer picks up composition changes on the next frame.
+    ///
+    /// Preview strategy:
+    ///   - No cuts, no speed: play directly off the original asset. Segment
+    ///     times align with the asset clock, so the time-map is a pass-through.
+    ///   - Cuts or speed present: play off a composition whose video+audio
+    ///     tracks contain the kept/re-timed ranges, so cuts skip and speed
+    ///     scales the clock naturally.
+    ///
+    /// **Flicker avoidance:** swapping the player item causes a black flash
+    /// while AVPlayer re-initializes its rendering pipeline, so we only do
+    /// it when the cut/speed *topology* changes. Rect/style edits on zoom
+    /// or censor segments just refresh `videoComposition` on the current
+    /// item — cheap and flicker-free.
+    fileprivate func applyZoomTransformForCurrentTime() {
+        guard let player = player, let asset = asset else { return }
+
+        let hasCuts = !cutSegments.isEmpty
+        let hasSpeed = !speedSegments.isEmpty
+        let hasFreeze = !freezeSegments.isEmpty
+        let hasEffects = !zoomSegments.isEmpty || !censorSegments.isEmpty || !textSegments.isEmpty
+        let needsComposition = hasCuts || hasSpeed || hasFreeze
+        // Fingerprint of the full timeline topology (cuts + speeds +
+        // freezes). When unchanged we can keep the existing composition-
+        // backed player item and only refresh its videoComposition.
+        let topoFingerprint = timelineTopologyFingerprint()
+
+        // Fast path: nothing to apply. Fall back to the original asset with
+        // no videoComposition.
+        if !needsComposition && !hasEffects {
+            if previewUsesComposition {
+                swapPreviewPlayerItem(asset: asset, videoComposition: nil)
+                previewUsesComposition = false
+                previewCompositionTopoFingerprint = ""
+            } else {
+                player.currentItem?.videoComposition = nil
+            }
+            return
+        }
+
+        // Cuts/speed absent: stay on the original asset and only attach the
+        // effects composition — much cheaper than rebuilding the player item.
+        if !needsComposition {
+            if previewUsesComposition {
+                swapPreviewPlayerItem(asset: asset, videoComposition: nil)
+                previewUsesComposition = false
+                previewCompositionTopoFingerprint = ""
+            }
+            player.currentItem?.videoComposition = buildEffectsVideoComposition(
+                for: asset,
+                videoTrack: asset.tracks(withMediaType: .video).first,
+                renderSize: nil,
+                timeMap: singleShiftTimeMap(shift: 0, duration: CMTimeGetSeconds(asset.duration)),
+                timeRangeDuration: CMTimeGetSeconds(asset.duration)
+            )
+            return
+        }
+
+        // Timeline topology unchanged: reuse the existing item and refresh
+        // only the effects composition. Avoids the black flash on rect edits.
+        if previewUsesComposition,
+           previewCompositionTopoFingerprint == topoFingerprint,
+           let currentItem = player.currentItem,
+           let compAsset = currentItem.asset as? AVMutableComposition,
+           let cvt = compAsset.tracks(withMediaType: .video).first {
+            if hasEffects {
+                // Rebuild the time-map from current state so the compositor
+                // still has accurate comp→source mapping even after trim
+                // edits (topology fingerprint is invariant to trim).
+                let kept = VideoCuts.keptRanges(trimStart: 0, trimEnd: duration, cuts: cutSegments)
+                let pieces = VideoSpeeds.pieces(keptRanges: kept,
+                                                  speeds: speedSegments,
+                                                  freezes: freezeSegments)
+                currentItem.videoComposition = buildEffectsVideoComposition(
+                    for: compAsset,
+                    videoTrack: cvt,
+                    renderSize: nil,
+                    timeMap: piecesToTimeMap(pieces: pieces),
+                    timeRangeDuration: CMTimeGetSeconds(compAsset.duration)
+                )
+            } else {
+                currentItem.videoComposition = nil
+            }
+            return
+        }
+
+        // Topology changed (cuts/speed added/removed/resized). Rebuild the
+        // composition-backed player item. Preview uses the *full* asset
+        // duration — not just the trim range — so scrubbing the trim bars
+        // still works against source-asset time.
+        guard let processed = buildProcessedComposition(
+            srcAsset: asset,
+            trimStartSec: 0,
+            trimEndSec: duration,
+            includeAudio: true
+        ) else { return }
+
+        var videoComp: AVMutableVideoComposition?
+        if hasEffects {
+            videoComp = buildEffectsVideoComposition(
+                for: processed.composition,
+                videoTrack: processed.videoTrack,
+                renderSize: nil,
+                timeMap: processed.timeMap,
+                timeRangeDuration: processed.duration
+            )
+        }
+        swapPreviewPlayerItem(asset: processed.composition, videoComposition: videoComp)
+        previewUsesComposition = true
+        previewCompositionTopoFingerprint = topoFingerprint
+    }
+
+    /// Snapshot of the cut+speed topology used to build `player.currentItem`
+    /// when that item is a composition. Compared against the current
+    /// fingerprint to decide whether a player-item swap is needed.
+    private var previewCompositionTopoFingerprint = ""
+
+    /// Replace the player's current item with a new one backed by `asset`,
+    /// preserving playback position and rate. Preview seeks target the source
+    /// asset clock, so we map the current time through the cut-aware time
+    /// map before resuming.
+    private func swapPreviewPlayerItem(asset: AVAsset, videoComposition: AVMutableVideoComposition?) {
+        guard let player = player else { return }
+        let wasPlaying = player.rate != 0
+        let prevRate = player.rate
+        let prevSourceTime: Double = {
+            if let current = player.currentItem {
+                let t = CMTimeGetSeconds(current.currentTime())
+                return previewUsesComposition ? previewCompTimeToSource(t) : t
+            }
+            return trimStart
+        }()
+
+        let newItem = AVPlayerItem(asset: asset)
+        newItem.videoComposition = videoComposition
+        player.replaceCurrentItem(with: newItem)
+
+        // Map source time → target item's clock. The comp item's clock is
+        // "kept-ranges concatenated from 0". Outside of preview-comp mode
+        // (straight asset), source == comp time.
+        let targetT: Double
+        if videoComposition != nil || asset is AVMutableComposition {
+            targetT = previewSourceTimeToComp(prevSourceTime, against: asset)
+        } else {
+            targetT = prevSourceTime
+        }
+        player.seek(to: CMTime(seconds: targetT, preferredTimescale: 600),
+                    toleranceBefore: .zero, toleranceAfter: .zero)
+        if wasPlaying { player.rate = prevRate }
+    }
+
+    /// Convert a preview composition-clock time to source-asset time using
+    /// the current cuts, speeds and freezes.
+    ///
+    /// Formula: for the piece covering `compTime`,
+    ///     `sourceTime = piece.srcStart + (compTime - piece.compStart) * factor`.
+    /// Freeze pieces have a tiny source slice and a factor close to zero,
+    /// so the result stays inside `[srcStart, srcStart + slice]` throughout
+    /// the hold — perfect for mapping the playhead back to "the frame
+    /// that's frozen."
+    private func previewCompTimeToSource(_ compTime: Double) -> Double {
+        let kept = VideoCuts.keptRanges(trimStart: 0, trimEnd: duration, cuts: cutSegments)
+        let pieces = VideoSpeeds.pieces(keptRanges: kept,
+                                          speeds: speedSegments,
+                                          freezes: freezeSegments)
+        var cursor: Double = 0
+        for piece in pieces {
+            let compDur = piece.compositionDuration
+            let compEnd = cursor + compDur
+            if compTime >= cursor && compTime < compEnd {
+                return piece.srcStart + (compTime - cursor) * piece.factor
+            }
+            cursor = compEnd
+        }
+        // Past the end — clamp to the last piece's source end.
+        if let last = pieces.last {
+            return last.srcEnd
+        }
+        return compTime
+    }
+
+    /// Inverse of `previewCompTimeToSource`. Clamps to the nearest piece
+    /// when `sourceTime` falls inside a cut (no piece covers it). For
+    /// freeze pieces the mapping is ambiguous — any compTime inside the
+    /// hold maps to the same sourceTime. We pick the start of the hold
+    /// when the caller asks for that exact frame, which gives seek /
+    /// scrub behaviour that feels natural.
+    private func previewSourceTimeToComp(_ sourceTime: Double, against asset: AVAsset) -> Double {
+        let kept = VideoCuts.keptRanges(trimStart: 0, trimEnd: duration, cuts: cutSegments)
+        let pieces = VideoSpeeds.pieces(keptRanges: kept,
+                                          speeds: speedSegments,
+                                          freezes: freezeSegments)
+        var cursor: Double = 0
+        for piece in pieces {
+            if sourceTime < piece.srcStart {
+                return cursor
+            }
+            if sourceTime <= piece.srcEnd {
+                let within = sourceTime - piece.srcStart
+                // Inverse of sourceTime = srcStart + compDelta * factor.
+                let compDelta = piece.factor > 0 ? within / piece.factor : 0
+                return cursor + compDelta
+            }
+            cursor += piece.compositionDuration
+        }
+        return cursor
+    }
+
+    /// True when the player's current item is a cut-stripped composition
+    /// (so its clock no longer matches the source asset).
+    private var previewUsesComposition = false
+
+    /// Build an `AVMutableVideoComposition` driven by `EffectsVideoCompositor`.
+    /// The compositor renders zoom + censor segments per frame via Core Image,
+    /// so motion is smooth and blur/pixelate can coexist with zoom in a single
+    /// pass.
+    ///
+    /// - Parameters:
+    ///   - asset: Asset whose tracks are referenced (may be a composition).
+    ///   - videoTrack: Specific track to instrument. Must belong to `asset`.
+    ///     If nil, picks the first video track.
+    ///   - renderSize: Output size. Pass nil to use the video track's natural
+    ///     (orientation-applied) size.
+    ///   - timeShift: Seconds to subtract from segment times to put them on
+    ///     the composition's clock. Export sets this to `trimStart`.
+    ///   - timeRangeDuration: Total composition length in seconds (composition
+    ///     clock). Used for the instruction timeRange.
+    /// Simple composition for the scale-only export path (no zoom, no censor).
+    /// Applies preferredTransform + uniform scale via setTransform — cheap, no
+    /// custom compositor cost.
+    private func buildScaleOnlyComposition(videoTrack: AVAssetTrack, renderSize: CGSize, totalDuration: Double) -> AVMutableVideoComposition {
+        let natSize = videoTrack.naturalSize.applying(videoTrack.preferredTransform)
+        let scaleX = renderSize.width / abs(natSize.width)
+        let scaleY = renderSize.height / abs(natSize.height)
+        let transform = videoTrack.preferredTransform
+            .concatenating(CGAffineTransform(scaleX: scaleX, y: scaleY))
+
+        let instruction = AVMutableVideoCompositionInstruction()
+        instruction.timeRange = CMTimeRange(start: .zero, duration: CMTime(seconds: totalDuration, preferredTimescale: 600))
+        instruction.backgroundColor = NSColor.black.cgColor
+
+        let layer = AVMutableVideoCompositionLayerInstruction(assetTrack: videoTrack)
+        layer.setTransform(transform, at: .zero)
+        instruction.layerInstructions = [layer]
+
+        let composition = AVMutableVideoComposition()
+        composition.instructions = [instruction]
+        composition.renderSize = renderSize
+        let fps = videoTrack.nominalFrameRate > 0 ? videoTrack.nominalFrameRate : 30
+        composition.frameDuration = CMTime(value: 1, timescale: CMTimeScale(fps))
+        return composition
+    }
+
+    /// Build an AVMutableVideoComposition backed by the custom effects
+    /// compositor.
+    ///
+    /// - Parameters:
+    ///   - asset: the asset (often an AVMutableComposition) whose track we
+    ///     read. Its track IDs must match `videoTrack`.
+    ///   - videoTrack: the specific track to read from.
+    ///   - renderSize: nil means "use natural-size rendering."
+    ///   - timeMap: composition-time → source-asset-time mapping. Callers
+    ///     without cuts pass a single entry spanning the whole composition.
+    ///   - timeRangeDuration: total length (in composition time) of the
+    ///     instruction's timeRange.
+    private func buildEffectsVideoComposition(for asset: AVAsset, videoTrack: AVAssetTrack?, renderSize: CGSize?, timeMap: [EffectsCompositionInstruction.TimeMapEntry], timeRangeDuration: Double) -> AVMutableVideoComposition? {
+        let track = videoTrack ?? asset.tracks(withMediaType: .video).first
+        guard let videoTrack = track else { return nil }
+        let natSize = videoTrack.naturalSize.applying(videoTrack.preferredTransform)
+        let naturalW = abs(natSize.width)
+        let naturalH = abs(natSize.height)
+        let renderW = renderSize?.width ?? naturalW
+        let renderH = renderSize?.height ?? naturalH
+
+        // Skip composition entirely when there's nothing to render — callers
+        // should already guard on this, but being explicit avoids shipping a
+        // custom compositor through the pipeline unnecessarily.
+        //
+        // Freezes also force the compositor on: their time-map entries scale
+        // a 1/600s source slice to holdDuration seconds (factor ≈ 1/600),
+        // which AVAssetExportSession can't handle via bare scaleTimeRange.
+        // Routing through our compositor lets the time-map resolve comp time
+        // back to source time frame-by-frame, producing a clean frame hold.
+        guard !zoomSegments.isEmpty || !censorSegments.isEmpty || !freezeSegments.isEmpty || !textSegments.isEmpty else {
+            return nil
+        }
+
+        // Bake orientation + scale into one transform. The compositor applies
+        // it to the raw source buffer to produce a render-space CIImage.
+        let scaleX = renderW / naturalW
+        let scaleY = renderH / naturalH
+        let baseTransform = videoTrack.preferredTransform
+            .concatenating(CGAffineTransform(scaleX: scaleX, y: scaleY))
+
+        // Snapshot segments *by value* into plain arrays. The compositor runs
+        // on background queues; we must not share main-actor state with it.
+        let zoomSnapshot = zoomSegments
+            .filter { $0.endTime > $0.startTime }
+            .sorted { $0.startTime < $1.startTime }
+        let censorSnapshot = censorSegments
+            .filter { $0.endTime > $0.startTime }
+            .sorted { $0.startTime < $1.startTime }
+
+        // Build text snapshots: rasterize each visible text segment at its
+        // render-pixel size, reusing cached images when the spec is
+        // unchanged. The cache stays on the main actor; we hand the
+        // background-safe `TextSnapshot` (CIImage + scalars) to the
+        // compositor instruction.
+        let textSnapshots = buildTextSnapshots(renderSize: CGSize(width: renderW, height: renderH),
+                                                 naturalSize: CGSize(width: naturalW, height: naturalH))
+
+        let instruction = EffectsCompositionInstruction(
+            timeRange: CMTimeRange(
+                start: .zero,
+                duration: CMTime(seconds: timeRangeDuration, preferredTimescale: 600)
+            ),
+            videoTrackID: videoTrack.trackID,
+            naturalSize: CGSize(width: naturalW, height: naturalH),
+            renderSize: CGSize(width: renderW, height: renderH),
+            baseTransform: baseTransform,
+            timeMap: timeMap,
+            zoomSegments: zoomSnapshot,
+            censorSegments: censorSnapshot,
+            textSnapshots: textSnapshots
+        )
+
+        let composition = AVMutableVideoComposition()
+        composition.customVideoCompositorClass = EffectsVideoCompositor.self
+        composition.instructions = [instruction]
+        composition.renderSize = CGSize(width: renderW, height: renderH)
+        let fps = videoTrack.nominalFrameRate > 0 ? videoTrack.nominalFrameRate : 30
+        composition.frameDuration = CMTime(value: 1, timescale: CMTimeScale(fps))
+
+        return composition
+    }
+
+    /// Convenience: build a single-entry time map from a scalar shift. All
+    /// existing non-cut, non-speed callers use this — factor 1 means the
+    /// piece plays at real time.
+    private func singleShiftTimeMap(shift: Double, duration: Double) -> [EffectsCompositionInstruction.TimeMapEntry] {
+        return [.init(compStart: 0, compEnd: duration, sourceStart: shift, factor: 1.0)]
+    }
+
+    /// Map composition-time → source-asset-time for the standard export path
+    /// (trim + cuts + speed). `compositionDuration` is the composition's
+    /// actual duration (after all three).
+    private func timeMapForExport(compositionDuration: Double) -> [EffectsCompositionInstruction.TimeMapEntry] {
+        let kept = VideoCuts.keptRanges(
+            trimStart: trimStart,
+            trimEnd: trimEnd,
+            cuts: cutSegments
+        )
+        let pieces = VideoSpeeds.pieces(keptRanges: kept,
+                                          speeds: speedSegments,
+                                          freezes: freezeSegments)
+        let entries = piecesToTimeMap(pieces: pieces)
+        if entries.isEmpty {
+            // Fall back to a passthrough single-entry map (should not happen
+            // when the caller already has a non-zero composition duration).
+            return singleShiftTimeMap(shift: trimStart, duration: compositionDuration)
+        }
+        return entries
+    }
+
+    /// Convert a list of pieces (kept ranges split by speed) into the
+    /// compositor's `TimeMapEntry` array. Pieces are laid out contiguously
+    /// on the composition clock in input order.
+    private func piecesToTimeMap(pieces: [VideoSpeeds.Piece]) -> [EffectsCompositionInstruction.TimeMapEntry] {
+        var entries: [EffectsCompositionInstruction.TimeMapEntry] = []
+        var cursor: Double = 0
+        for piece in pieces {
+            let compDur = piece.compositionDuration
+            guard compDur > 0 else { continue }
+            entries.append(
+                EffectsCompositionInstruction.TimeMapEntry(
+                    compStart: cursor,
+                    compEnd: cursor + compDur,
+                    sourceStart: piece.srcStart,
+                    factor: piece.factor
+                )
+            )
+            cursor += compDur
+        }
+        return entries
+    }
+
+    /// The full set of speed segments currently owned by the effects band.
+    /// Mirror of `cutSegments` / `zoomSegments` but for speed.
+    private var speedSegments: [VideoSpeedSegment] { effectsBand?.speedSegments ?? [] }
+
+    /// Freeze segments — point-in-time pauses. See `VideoFreezeSegment`.
+    private var freezeSegments: [VideoFreezeSegment] { effectsBand?.freezeSegments ?? [] }
+
+    /// Result of `buildProcessedComposition` — the composition plus the
+    /// matching time-map and the video/audio comp tracks so callers can
+    /// route a custom compositor at them.
+    fileprivate struct ProcessedComposition {
+        let composition: AVMutableComposition
+        let videoTrack: AVMutableCompositionTrack
+        let audioTracks: [AVMutableCompositionTrack]
+        let timeMap: [EffectsCompositionInstruction.TimeMapEntry]
+        /// Composition-clock duration (after cuts + speed).
+        let duration: Double
+    }
+
+    /// Build an AVMutableComposition that bakes in the current trim range,
+    /// cut list and speed list. Audio tracks mirror the video so A/V stays
+    /// in sync across cuts and speed changes.
+    ///
+    /// - Parameters:
+    ///   - srcAsset: Original source asset (for its video/audio tracks).
+    ///   - trimStartSec / trimEndSec: Effective trim range in source time.
+    ///   - includeAudio: When false, no audio tracks are created.
+    ///
+    /// Returns nil if the source has no video track or the resulting
+    /// composition would be empty.
+    fileprivate func buildProcessedComposition(srcAsset: AVAsset,
+                                                trimStartSec: Double,
+                                                trimEndSec: Double,
+                                                includeAudio: Bool) -> ProcessedComposition? {
+        guard let srcVideoTrack = srcAsset.tracks(withMediaType: .video).first else { return nil }
+        let comp = AVMutableComposition()
+        guard let cvt = comp.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else { return nil }
+        let srcAudio = srcAsset.tracks(withMediaType: .audio)
+        var compAudio: [AVMutableCompositionTrack] = []
+        if includeAudio {
+            for _ in srcAudio {
+                if let a = comp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
+                    compAudio.append(a)
+                }
+            }
+        }
+
+        let kept = VideoCuts.keptRanges(
+            trimStart: trimStartSec,
+            trimEnd: trimEndSec,
+            cuts: cutSegments
+        )
+        let pieces = VideoSpeeds.pieces(keptRanges: kept,
+                                          speeds: speedSegments,
+                                          freezes: freezeSegments)
+        guard !pieces.isEmpty else { return nil }
+
+        var cursor = CMTime.zero
+        for piece in pieces {
+            let srcRange = CMTimeRange(
+                start: CMTime(seconds: piece.srcStart, preferredTimescale: 600),
+                end: CMTime(seconds: piece.srcEnd, preferredTimescale: 600)
+            )
+            let compDur = CMTime(seconds: piece.compositionDuration, preferredTimescale: 600)
+            let insertStart = cursor
+
+            // Video — insert the source range, then (for non-1x pieces)
+            // scale it to the piece's target composition duration. This
+            // covers both speed and freeze: a freeze is just a very
+            // tight slice scaled up a lot.
+            try? cvt.insertTimeRange(srcRange, of: srcVideoTrack, at: insertStart)
+
+            // Audio — mirror the video insert EXCEPT on freezes. A
+            // freeze scaled up from a 1/600s slice would produce a
+            // ~2-sample-long chirp stretched over a second — awful.
+            // Skipping audio leaves a silent gap, which is what users
+            // expect when a frame is paused.
+            if piece.kind != .freeze {
+                for (src, dst) in zip(srcAudio, compAudio) {
+                    try? dst.insertTimeRange(srcRange, of: src, at: insertStart)
+                }
+            }
+
+            // Apply time scaling after the inserts. `factor == 1` is a
+            // no-op at the math level but we skip the call to dodge any
+            // float-precision drift AVFoundation might introduce.
+            if piece.factor != 1.0 {
+                let inserted = CMTimeRange(start: insertStart, duration: srcRange.duration)
+                cvt.scaleTimeRange(inserted, toDuration: compDur)
+                if piece.kind != .freeze {
+                    for dst in compAudio {
+                        dst.scaleTimeRange(inserted, toDuration: compDur)
+                    }
+                }
+            }
+            cursor = CMTimeAdd(cursor, compDur)
+        }
+
+        return ProcessedComposition(
+            composition: comp,
+            videoTrack: cvt,
+            audioTracks: compAudio,
+            timeMap: piecesToTimeMap(pieces: pieces),
+            duration: CMTimeGetSeconds(comp.duration)
+        )
+    }
+
+    /// Fingerprint of the current cut+speed+freeze topology — used by the
+    /// preview path to decide whether a player-item swap is needed.
+    /// Changes to zoom/censor *rects* don't affect this, so those edits
+    /// stay cheap.
+    fileprivate func timelineTopologyFingerprint() -> String {
+        let cuts = cutSegments
+            .map { String(format: "c:%.4f-%.4f", $0.startTime, $0.endTime) }
+            .sorted()
+        let speeds = speedSegments
+            .map { String(format: "s:%.4f-%.4f@%.3f", $0.startTime, $0.endTime, $0.speedFactor) }
+            .sorted()
+        let freezes = freezeSegments
+            .map { String(format: "f:%.4f@%.3f", $0.atTime, $0.holdDuration) }
+            .sorted()
+        return (cuts + speeds + freezes).joined(separator: "|")
     }
 
     private func stepFrame(forward: Bool) {
@@ -1336,12 +2698,427 @@ private final class VideoEditorView: NSView {
 
         let fps = asset?.tracks(withMediaType: .video).first?.nominalFrameRate ?? 30
         let frameDuration = 1.0 / Double(fps)
-        let current = CMTimeGetSeconds(player.currentTime())
-        let target = forward
-            ? min(current + frameDuration, trimEnd)
-            : max(current - frameDuration, trimStart)
+        let currentSource = mapPreviewClockToSourceTime(CMTimeGetSeconds(player.currentTime()))
+        let targetSource = forward
+            ? min(currentSource + frameDuration, trimEnd)
+            : max(currentSource - frameDuration, trimStart)
+        let target = mapSourceTimeToPreviewClock(targetSource)
         player.seek(to: CMTime(seconds: target, preferredTimescale: 600),
                      toleranceBefore: .zero, toleranceAfter: .zero)
         needsDisplay = true
+    }
+
+    // MARK: - EffectsBandView integration
+
+    /// Compute the scroll view's visible height for a given row count,
+    /// capped at `effectsVisibleRowCount` rows so the editor window doesn't
+    /// grow beyond a sensible limit. Matches `EffectsBandView.intrinsicContentSize`
+    /// including its top/bottom padding so resize handles stay visible.
+    fileprivate func effectsScrollViewHeight(forRowCount rows: Int) -> CGFloat {
+        let visible = max(1, min(effectsVisibleRowCount, rows))
+        // (visible × stride − gap) + 2× vertical inset (matches EffectsBandView.verticalInset = 4)
+        return CGFloat(visible) * effectsRowStride - 2 + 8
+    }
+
+    // MARK: - Text segment rasterization (cached)
+
+    /// Build per-segment text snapshots used by the compositor. Each visible
+    /// text segment is rasterized once at its rect's pixel size; subsequent
+    /// builds reuse the cached image when the spec hasn't changed.
+    ///
+    /// Performance: rasterization is a CGContext draw with a single
+    /// NSAttributedString — sub-millisecond at typical sizes. It runs only
+    /// when the spec changes (text typed, color/size/bg edited, rect
+    /// resized, or render-size changed). Per-frame rendering then composites
+    /// the cached CIImage with one transform + one composite.
+    fileprivate func buildTextSnapshots(renderSize: CGSize,
+                                          naturalSize: CGSize)
+        -> [EffectsCompositionInstruction.TextSnapshot]
+    {
+        guard renderSize.width > 0, renderSize.height > 0 else { return [] }
+        var snapshots: [EffectsCompositionInstruction.TextSnapshot] = []
+        snapshots.reserveCapacity(textSegments.count)
+
+        // Track which segment ids we still need so we can drop stale entries
+        // (e.g. a segment was deleted) at the end.
+        var liveIDs = Set<UUID>()
+
+        for seg in textSegments where seg.endTime > seg.startTime {
+            if seg.id == inlineTextEditingSegmentID {
+                liveIDs.insert(seg.id)
+                continue
+            }
+            // Pixel size of the segment's rect at the render resolution.
+            // The rasterizer uses this to size the canvas; the per-frame
+            // composite scales it 1:1 into render-space.
+            let pxW = max(2, Int((seg.rect.width * renderSize.width).rounded()))
+            let pxH = max(2, Int((seg.rect.height * renderSize.height).rounded()))
+            let spec = VideoTextRasterizer.spec(for: seg,
+                                                  pixelWidth: pxW,
+                                                  pixelHeight: pxH,
+                                                  renderHeight: Int(renderSize.height.rounded()))
+
+            let cgImage: CGImage
+            if let cached = textRasterCache[seg.id], cached.spec == spec {
+                cgImage = cached.image
+            } else {
+                guard let rendered = VideoTextRasterizer.render(spec) else { continue }
+                cgImage = rendered
+                textRasterCache[seg.id] = (spec, rendered)
+            }
+            liveIDs.insert(seg.id)
+
+            let ci = CIImage(cgImage: cgImage)
+            snapshots.append(.init(id: seg.id,
+                                    startTime: seg.startTime,
+                                    endTime: seg.endTime,
+                                    rect: seg.rect,
+                                    fadeIn: seg.fadeIn,
+                                    fadeOut: seg.fadeOut,
+                                    image: ci))
+        }
+
+        // Evict cache entries for segments that no longer exist. Keeps the
+        // dictionary's footprint bounded in long editing sessions.
+        for key in Array(textRasterCache.keys) where !liveIDs.contains(key) {
+            textRasterCache.removeValue(forKey: key)
+        }
+
+        return snapshots
+    }
+
+    // MARK: - Inline text editing
+
+    /// Pop a borderless NSTextView at `viewRect` (in `hostView` coordinates)
+    /// so the user can type the segment's contents in place. Player pauses
+    /// while editing so the user isn't fighting against playback.
+    fileprivate func beginInlineTextEdit(segmentID: UUID,
+                                          atViewRect viewRect: NSRect,
+                                          hostView: NSView) {
+        guard let seg = textSegments.first(where: { $0.id == segmentID }) else { return }
+        // Cancel any prior edit first.
+        cancelInlineTextEdit(commit: false)
+
+        // Pause playback during editing so AVPlayer doesn't drive the rect
+        // out from under the text field.
+        if let player = player, player.rate > 0 {
+            player.pause()
+            pausedForTextEdit = true
+        }
+
+        // Convert host-view coords to our (editor view's) coords so we can
+        // place the field as a sibling of the player view.
+        let frame = hostView.convert(viewRect, to: self)
+
+        let displayedVideoHeight = frame.height / max(seg.rect.height, 0.0001)
+        var editorFontSize = max(8, seg.fontSize * displayedVideoHeight / 1080)
+        editorFontSize = min(editorFontSize, max(8, frame.height * 0.78))
+
+        let font = inlineTextFont(for: seg, size: editorFontSize)
+        let textColor = nsColor(seg.textColor)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = nsTextAlignment(for: seg.alignment)
+        paragraph.lineBreakMode = .byTruncatingTail
+
+        // Borderless scrollable text view sized to the segment rect. We use
+        // NSTextView (not NSTextField) so multiline edits and large fonts
+        // render predictably.
+        let scroll = NSScrollView(frame: frame)
+        scroll.hasVerticalScroller = false
+        scroll.hasHorizontalScroller = false
+        scroll.borderType = .noBorder
+        scroll.drawsBackground = false
+        scroll.wantsLayer = true
+        scroll.layer?.backgroundColor = inlineTextBackgroundColor(for: seg)?.cgColor
+        scroll.layer?.cornerRadius = inlineTextBackgroundRadius(for: seg, frame: frame)
+        scroll.layer?.masksToBounds = true
+        scroll.layer?.borderColor = NSColor(calibratedRed: 1.0, green: 0.78, blue: 0.30, alpha: 1.0).cgColor
+        scroll.layer?.borderWidth = 1.5
+        scroll.autoresizingMask = []
+        scroll.contentView.drawsBackground = false
+
+        let tv = InlineVideoTextView(frame: NSRect(origin: .zero, size: frame.size))
+        tv.isRichText = false
+        tv.allowsUndo = true
+        tv.isVerticallyResizable = false
+        tv.isHorizontallyResizable = false
+        tv.textContainer?.lineFragmentPadding = 0
+        tv.textContainer?.widthTracksTextView = true
+        tv.textContainer?.heightTracksTextView = false
+        tv.horizontalTextInset = max(2, editorFontSize * 0.18)
+        tv.drawsBackground = false
+        tv.font = font
+        tv.textColor = textColor
+        tv.alignment = paragraph.alignment
+        tv.defaultParagraphStyle = paragraph
+        tv.typingAttributes = [
+            .font: font,
+            .foregroundColor: textColor,
+            .paragraphStyle: paragraph,
+        ]
+        tv.insertionPointColor = NSColor(calibratedRed: 1.0, green: 0.78, blue: 0.30, alpha: 1.0)
+        tv.string = seg.text
+        if let storage = tv.textStorage, storage.length > 0 {
+            storage.addAttributes(tv.typingAttributes, range: NSRange(location: 0, length: storage.length))
+        }
+        tv.centerTextVertically()
+        tv.setSelectedRange(NSRange(location: (tv.string as NSString).length, length: 0))
+        tv.delegate = self
+
+        scroll.documentView = tv
+        addSubview(scroll)
+
+        inlineTextEditor = tv
+        inlineTextEditorScrollView = scroll
+        inlineTextEditingSegmentID = segmentID
+        applyZoomTransformForCurrentTime()
+        window?.makeFirstResponder(tv)
+    }
+
+    fileprivate func commitInlineTextEdit() {
+        guard let id = inlineTextEditingSegmentID,
+              let tv = inlineTextEditor,
+              let seg = textSegments.first(where: { $0.id == id }) else {
+            cancelInlineTextEdit(commit: false)
+            return
+        }
+        let newText = tv.string
+        let changed = newText != seg.text
+        if changed {
+            seg.text = newText
+            // Drop the cache for this segment so the next composition
+            // rebuild re-rasterizes with the new text.
+            textRasterCache.removeValue(forKey: id)
+            savedURL = nil
+        }
+        cancelInlineTextEdit(commit: false)
+        if changed {
+            effectsBand?.refreshAfterParentEdit()
+        }
+    }
+
+    fileprivate func cancelInlineTextEdit(commit: Bool) {
+        if commit {
+            commitInlineTextEdit()
+            return
+        }
+        let wasEditing = inlineTextEditingSegmentID != nil
+        inlineTextEditorScrollView?.removeFromSuperview()
+        inlineTextEditor = nil
+        inlineTextEditorScrollView = nil
+        inlineTextEditingSegmentID = nil
+        if pausedForTextEdit {
+            pausedForTextEdit = false
+        }
+        window?.makeFirstResponder(self)
+        if wasEditing {
+            applyZoomTransformForCurrentTime()
+        }
+        needsDisplay = true
+    }
+
+    private func nsColor(_ rgba: VideoTextSegment.RGBA) -> NSColor {
+        NSColor(srgbRed: rgba.r, green: rgba.g, blue: rgba.b, alpha: rgba.a)
+    }
+
+    private func nsTextAlignment(for alignment: VideoTextSegment.Alignment) -> NSTextAlignment {
+        switch alignment {
+        case .left: return .left
+        case .center: return .center
+        case .right: return .right
+        }
+    }
+
+    private func inlineTextFont(for seg: VideoTextSegment, size: CGFloat) -> NSFont {
+        var traits: NSFontDescriptor.SymbolicTraits = []
+        if seg.bold { traits.insert(.bold) }
+        if seg.italic { traits.insert(.italic) }
+
+        let base = NSFont.systemFont(ofSize: size, weight: seg.bold ? .bold : .regular)
+        if !traits.isEmpty {
+            let descriptor = base.fontDescriptor.withSymbolicTraits(traits)
+            if let font = NSFont(descriptor: descriptor, size: size) {
+                return font
+            }
+        }
+        return base
+    }
+
+    private func inlineTextBackgroundColor(for seg: VideoTextSegment) -> NSColor? {
+        switch seg.bgStyle {
+        case .none:
+            return nil
+        case .solid, .rounded:
+            return nsColor(seg.bgColor)
+        }
+    }
+
+    private func inlineTextBackgroundRadius(for seg: VideoTextSegment, frame: NSRect) -> CGFloat {
+        switch seg.bgStyle {
+        case .none, .solid:
+            return 0
+        case .rounded:
+            let shortSide = min(frame.width, frame.height)
+            return min(shortSide * 0.25, frame.height * 0.30)
+        }
+    }
+
+    // MARK: - Custom color picker
+
+    /// Open NSColorPanel and bind it to the given segment's text or bg
+    /// color field. The panel stays modal-less so the user can keep
+    /// editing other things; we observe `colorDidChange` notifications
+    /// while it's relevant and unbind on close.
+    fileprivate func presentTextColorPicker(segmentID: UUID, isBackground: Bool) {
+        guard textSegments.contains(where: { $0.id == segmentID }) else { return }
+        textColorPickerSegmentID = segmentID
+        textColorPickerIsBackground = isBackground
+        let panel = NSColorPanel.shared
+        panel.showsAlpha = true
+        if let seg = textSegments.first(where: { $0.id == segmentID }) {
+            let rgba = isBackground ? seg.bgColor : seg.textColor
+            panel.color = NSColor(srgbRed: rgba.r, green: rgba.g, blue: rgba.b, alpha: rgba.a)
+        }
+        // Hook up the action target. Reuse a single observer per editor.
+        panel.setTarget(self)
+        panel.setAction(#selector(textColorPanelDidChange(_:)))
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    @objc fileprivate func textColorPanelDidChange(_ sender: NSColorPanel) {
+        guard let id = textColorPickerSegmentID,
+              let seg = textSegments.first(where: { $0.id == id }) else { return }
+        let c = sender.color.usingColorSpace(.sRGB) ?? sender.color
+        let rgba = VideoTextSegment.RGBA(
+            r: Double(c.redComponent),
+            g: Double(c.greenComponent),
+            b: Double(c.blueComponent),
+            a: Double(c.alphaComponent))
+        if textColorPickerIsBackground {
+            seg.bgColor = rgba
+        } else {
+            seg.textColor = rgba
+        }
+        textRasterCache.removeValue(forKey: id)
+        savedURL = nil
+        applyZoomTransformForCurrentTime()
+        effectsBand?.refreshAfterParentEdit()
+    }
+}
+
+extension VideoEditorView: EffectsBandViewDelegate {
+    func effectsBandDidMutate(_ view: EffectsBandView) {
+        savedURL = nil
+        applyZoomTransformForCurrentTime()
+        needsDisplay = true
+    }
+
+    func effectsBand(_ view: EffectsBandView, didSelectSegment segmentID: UUID?) {
+        updateEffectsOverlay()
+    }
+
+    func effectsBand(_ view: EffectsBandView, didChangeRowCount rowCount: Int) {
+        currentEffectRowCount = rowCount
+        let newScrollH = effectsScrollViewHeight(forRowCount: rowCount)
+        effectsBandHeightConstraint?.animator().constant = newScrollH
+        // Player view also shrinks so the whole controls band (including the
+        // trim timeline) has room to grow upward.
+        playerBottomConstraint?.animator().constant = -controlsH
+        needsDisplay = true
+    }
+
+    func effectsBand(_ view: EffectsBandView, showStatus message: String, isError: Bool) {
+        showStatus(message, isError: isError)
+    }
+
+    func effectsBandDidRequestTextEdit(_ view: EffectsBandView, segmentID: UUID) {
+        // Reposition the overlay first so the rect we read is accurate for
+        // the current selection state.
+        updateEffectsOverlay()
+        guard let overlay = effectsOverlay,
+              let seg = textSegments.first(where: { $0.id == segmentID }) else { return }
+        let viewRect = overlay.viewRectFromNormalized(seg.rect)
+        beginInlineTextEdit(segmentID: segmentID, atViewRect: viewRect, hostView: overlay)
+    }
+
+    func effectsBandDidRequestTextColorPick(_ view: EffectsBandView,
+                                              segmentID: UUID,
+                                              isBackground: Bool) {
+        presentTextColorPicker(segmentID: segmentID, isBackground: isBackground)
+    }
+}
+
+extension VideoEditorView: NSTextViewDelegate {
+    func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        // Return commits, Escape cancels. Allow Shift+Return for newlines so
+        // multi-line text labels stay possible without leaving the editor.
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            commitInlineTextEdit()
+            return true
+        }
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+            cancelInlineTextEdit(commit: false)
+            return true
+        }
+        return false
+    }
+
+    func textDidChange(_ notification: Notification) {
+        // Re-rasterize on every keystroke would burn CPU; instead, cache
+        // invalidation happens at commit time. The user sees the new text
+        // appear in the inline NSTextView itself while typing — the rasterized
+        // overlay just stays at its previous content until commit.
+    }
+
+    func textDidEndEditing(_ notification: Notification) {
+        // Lost focus → commit. Matches Finder rename behavior.
+        commitInlineTextEdit()
+    }
+}
+
+private final class InlineVideoTextView: NSTextView {
+    var horizontalTextInset: CGFloat = 0 {
+        didSet { centerTextVertically() }
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        centerTextVertically()
+    }
+
+    override func didChangeText() {
+        super.didChangeText()
+        centerTextVertically()
+    }
+
+    func centerTextVertically() {
+        guard let container = textContainer, let manager = layoutManager else {
+            textContainerInset = NSSize(width: horizontalTextInset, height: 0)
+            return
+        }
+        manager.ensureLayout(for: container)
+        let usedHeight = manager.usedRect(for: container).height
+        let verticalInset = max(0, floor((bounds.height - usedHeight) / 2))
+        textContainerInset = NSSize(width: horizontalTextInset, height: verticalInset)
+    }
+}
+
+private extension CMSampleBuffer {
+    /// Returns a copy with a new presentation timestamp. Duration is preserved.
+    func retimed(presentationTime: CMTime) -> CMSampleBuffer? {
+        var timing = CMSampleTimingInfo(
+            duration: CMSampleBufferGetDuration(self),
+            presentationTimeStamp: presentationTime,
+            decodeTimeStamp: .invalid
+        )
+        var out: CMSampleBuffer?
+        let status = CMSampleBufferCreateCopyWithNewTiming(
+            allocator: nil,
+            sampleBuffer: self,
+            sampleTimingEntryCount: 1,
+            sampleTimingArray: &timing,
+            sampleBufferOut: &out
+        )
+        return status == noErr ? out : nil
     }
 }

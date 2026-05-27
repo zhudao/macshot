@@ -20,6 +20,7 @@
 "Capture OCR" = "OCR vastleggen";
 "Quick Capture" = "Snelle opname";
 "Scroll Capture" = "Scrollopname";
+"Capture Last Area" = "Laatste gebied vastleggen";
 "Capture Delay" = "Opnamevertraging";
 "None" = "Geen";
 "%d seconds" = "%d seconden";
@@ -183,12 +184,12 @@
 "Capture" = "Opname";
 "Play sound on capture" = "Geluid afspelen bij opname";
 "Play sound on copy" = "Geluid afspelen bij kopieren";
-"Remember last selection area" = "Laatste selectiegebied onthouden";
 "Remember last selected tool" = "Laatst geselecteerd gereedschap onthouden";
 "Show floating thumbnail after capture" = "Zwevende miniatuur tonen na opname";
 "Launch at login" = "Open bij inloggen";
 "Show snap alignment guides" = "Uitlijnhulplijnen tonen";
 "Capture mouse cursor in screenshot" = "Muiscursor vastleggen in schermafbeelding";
+"Double-click selection to copy" = "Dubbelklik op selectie om te kopiëren";
 "Use window title in saved filename" = "Venstertitel gebruiken in bestandsnaam";
 "Hide menu bar icon" = "Menubalkpictogram verbergen";
 "Hotkeys still work. To show the icon again, re-launch macshot." = "Sneltoetsen werken nog steeds. Start macshot opnieuw op om het pictogram weer te tonen.";
@@ -200,6 +201,11 @@
 "  Multiple previews:" = "  Meerdere voorbeelden:";
 "Stack (keep all)" = "Stapelen (alles bewaren)";
 "Replace (show only latest)" = "Vervangen (alleen laatste tonen)";
+"  Position:" = "  Positie:";
+"Menu Bar Order" = "Volgorde menubalk";
+"Choose the order of capture actions in the macshot menu bar menu." = "Kies de volgorde van opname-acties in het menubalkmenu van macshot.";
+"Move up" = "Omhoog verplaatsen";
+"Move down" = "Omlaag verplaatsen";
 "Output" = "Uitvoer";
 "Image format:" = "Afbeeldingsformaat:";
 "Quality:" = "Kwaliteit:";
@@ -376,6 +382,7 @@
 
 /* Save Panel */
 "Save As..." = "Bewaar als...";
+"Save Recording" = "Bewaar opname";
 "Choose a folder" = "Kies een map";
 "Save All to Folder…" = "Bewaar alles in map…";
 
@@ -405,7 +412,7 @@
 "Click \"Record\" and press a key combination with at least one modifier (⌘, ⌥, ⌃, ⇧) to set a shortcut." = "Klik op \"Opnemen\" en druk op een toetsencombinatie met ten minste een modifier (⌘, ⌥, ⌃, ⇧) om een sneltoets in te stellen.";
 
 /* Recording — GIF Processing */
-"Processing GIF\U2026" = "GIF verwerken\U2026";
+"Processing GIF…" = "GIF verwerken…";
 
 /* Recording — Input Monitoring Permission */
 "Input Monitoring Required" = "Invoerbewaking vereist";
@@ -434,6 +441,10 @@
 "Top Left" = "Linksboven";
 "Small" = "Klein";
 "Large" = "Groot";
+"Webcam Size Small" = "Klein";
+"Webcam Size Medium" = "Gemiddeld";
+"Webcam Size Large" = "Groot";
+"Webcam Size Extra Large" = "Extra groot";
 "Circle" = "Cirkel";
 "Rounded Rectangle" = "Afgeronde rechthoek";
 "Cam pos:" = "Cam pos.:";
@@ -495,3 +506,84 @@
 "Files are uploaded to a \"macshot\" folder in your Google Drive. Everything stays private — nothing is shared publicly." = "Bestanden worden geüpload naar een \"macshot\"-map in uw Google Drive. Alles blijft privé — er wordt niets openbaar gedeeld.";
 
 "Pressure" = "Druk";
+
+/* Added for v4.1.0-beta.3 — video editor, effects, open-video, shortcuts help */
+"Open Video..." = "Video openen...";
+"Choose a video to open in macshot editor" = "Kies een video om in de macshot-editor te openen";
+"Click to add effects" = "Klik om effecten toe te voegen";
+"Add Zoom" = "Zoom toevoegen";
+"Add Censor" = "Censuur toevoegen";
+"Add Cut" = "Knip toevoegen";
+"Add Speed" = "Snelheid toevoegen";
+"Add Freeze" = "Stilstaand beeld toevoegen";
+"Add Text" = "Tekst toevoegen";
+"Delete Zoom" = "Zoom verwijderen";
+"Delete Censor" = "Censuur verwijderen";
+"Delete Cut" = "Knip verwijderen";
+"Delete Speed" = "Snelheid verwijderen";
+"Delete Freeze" = "Stilstaand beeld verwijderen";
+"Delete Text" = "Tekst verwijderen";
+"Edit Text…" = "Tekst bewerken…";
+"Huge" = "Enorm";
+"Bold" = "Vet";
+"Italic" = "Cursief";
+"Alignment" = "Uitlijning";
+"Left" = "Links";
+"Center" = "Midden";
+"Right" = "Rechts";
+"Text Color" = "Tekstkleur";
+"Background Color" = "Achtergrondkleur";
+"Rounded" = "Afgerond";
+"Custom…" = "Aangepast…";
+"Transparent" = "Transparant";
+"Black" = "Zwart";
+"White" = "Wit";
+"Yellow" = "Geel";
+"Red" = "Rood";
+"Green" = "Groen";
+"Blue" = "Blauw";
+"Untitled" = "Naamloos";
+"Add effect" = "Effect toevoegen";
+"Fade" = "Vervagen";
+"High" = "Hoog";
+"Low" = "Laag";
+"Not enough room here" = "Niet genoeg ruimte hier";
+"Copied!" = "Gekopieerd!";
+"Converting to GIF…" = "Omzetten naar GIF…";
+"GIF conversion failed" = "GIF-conversie mislukt";
+"No video track found" = "Geen videotrack gevonden";
+"Preview:" = "Voorbeeld:";
+"Copy Screen Info" = "Scherminfo kopiëren";
+"Copies display and capture diagnostics to clipboard" = "Kopieert scherm- en opnamediagnostiek naar het klembord";
+"Accent" = "Accent";
+"Icon" = "Pictogram";
+"Background" = "Achtergrond";
+"Custom" = "Aangepast";
+"Theme:" = "Thema:";
+"Application" = "Applicatie";
+"Capture area and extract text" = "Gebied vastleggen en tekst extraheren";
+"Capture the full screen" = "Volledig scherm vastleggen";
+"Counter for multi-screen captures" = "Teller voor opnames op meerdere schermen";
+"8-character random string (e.g. k3j7x9q2)" = "Willekeurige reeks van 8 tekens (bijv. k3j7x9q2)";
+"Filename Template Tokens" = "Tokens voor bestandsnaamsjabloon";
+"Filename tokens" = "Bestandsnaam-tokens";
+"Filename:" = "Bestandsnaam:";
+"Open an image file in the editor" = "Open een afbeeldingsbestand in de editor";
+"Open the recent captures overlay" = "Open de overlay met recente opnames";
+"Open this settings window" = "Open dit instellingenvenster";
+"Quick capture (uses your Enter action)" = "Snelle opname (gebruikt je Enter-actie)";
+"Re-capture the last selected area" = "Laatst geselecteerde gebied opnieuw vastleggen";
+"Screenshots only — captured window title (blank otherwise)" = "Alleen schermafbeeldingen — titel van het vastgelegde venster (anders leeg)";
+"Show available filename tokens" = "Beschikbare bestandsnaam-tokens tonen";
+"Show supported URL scheme commands" = "Ondersteunde URL-schemacommando's tonen";
+"Enable macshot:// URL scheme" = "macshot:// URL-schema inschakelen";
+"Start area capture" = "Gebiedsopname starten";
+"Start area recording" = "Gebiedsopname (video) starten";
+"Start full-screen recording" = "Volledige schermopname starten";
+"Start scroll capture" = "Scrollopname starten";
+"Stop the current recording" = "Huidige opname stoppen";
+"Supported URL Scheme Commands" = "Ondersteunde URL-schemacommando's";
+"The file extension is appended automatically. Slashes and colons in {window} become dashes." = "De bestandsextensie wordt automatisch toegevoegd. Schuine strepen en dubbele punten in {window} worden streepjes.";
+"Trigger macshot from Raycast, Alfred, Shortcuts, or any tool that opens URLs." = "Activeer macshot vanuit Raycast, Alfred, Shortcuts of elke tool die URL's opent.";
+"URL scheme info" = "URL-schema-info";
+"sec (0 = never)" = "sec (0 = nooit)";

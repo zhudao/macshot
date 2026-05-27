@@ -80,6 +80,11 @@ class OverlayView: NSView {
     // MARK: - Properties
 
     weak var overlayDelegate: OverlayViewDelegate?
+    var timingMark: ((String) -> Void)?
+
+    override var isOpaque: Bool {
+        !usesExternalScreenshotPreview && screenshotImage != nil && !isScrollCapturing && !isRecording && !isEditorMode
+    }
 
     /// When true, hides overlay-only toolbar buttons (record, delay, cancel, move, scroll capture).
     /// Override point for subclasses. EditorView returns true.
@@ -90,6 +95,31 @@ class OverlayView: NSView {
     weak var chromeParentView: NSView?
 
     var screenshotImage: NSImage? {
+        didSet {
+            cachedCompositedImage = nil
+            cachedEffectsScreenshot = nil
+            cachedOpaqueRect = nil
+            if captureSourceImage != nil {
+                captureSourceImage = screenshotImage
+            }
+            if usesExternalScreenshotPreview {
+                let cgImage = screenshotImage?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+                externalScreenshotPreviewUpdater?(cgImage)
+            }
+            needsDisplay = true
+            // Screenshot just arrived (async capture) — enable snap queries now.
+            if screenshotImage != nil && windowSnapCooldown {
+                windowSnapCooldown = false
+                if window?.isVisible == true,
+                   state == .idle && windowSnapEnabled && !windowSnapQueryInFlight {
+                    queryWindowSnap(at: NSEvent.mouseLocation)
+                }
+            }
+        }
+    }
+    var captureSourceImage: NSImage?
+    var externalScreenshotPreviewUpdater: ((CGImage?) -> Void)?
+    var usesExternalScreenshotPreview = false {
         didSet { needsDisplay = true }
     }
 
@@ -124,6 +154,13 @@ class OverlayView: NSView {
     private var remoteResizeHandle: ResizeHandle = .none
     private var remoteResizeAnchor: NSPoint = .zero  // the fixed corner during remote resize
     private var selectionStart: NSPoint = .zero
+    /// Trackpad/mouse QoL: when the user right-clicks in the empty overlay
+    /// (state == .idle), we anchor a selection at that point and let the
+    /// cursor resize it with no button held. A subsequent left-click
+    /// finalizes, ESC cancels. This mirrors the drag flow but removes the
+    /// need to keep pressing — big usability win for large selections on
+    /// trackpads.
+    private var isAnchoredSelecting: Bool = false
     private var isDraggingSelection: Bool = false
     private var isResizingSelection: Bool = false
     private var resizeHandle: ResizeHandle = .none
@@ -131,6 +168,11 @@ class OverlayView: NSView {
     private var lastDragPoint: NSPoint?  // for shift constraint on flagsChanged
     private var spaceRepositioning: Bool = false  // Space held during drag to reposition
     private var spaceRepositionLast: NSPoint = .zero  // last mouse position when space reposition started
+
+    /// Snapshot of `undoStack.count` taken at the start of a fresh click in `selected` state.
+    /// Used by the "double-click to copy" feature to rewind annotations that the first click
+    /// (and any in-progress second click) added before triggering the confirm path.
+    private var doubleClickUndoBaseline: Int?
 
     // Annotations
     var annotations: [Annotation] = [] {
@@ -165,8 +207,14 @@ class OverlayView: NSView {
         ]
         return Dictionary(uniqueKeysWithValues: handlers.map { ($0.tool, $0) })
     }()
-    /// Last tool the user explicitly picked — shared across overlay instances within one app session.
-    private static var lastUsedTool: AnnotationTool = .arrow
+    /// Last tool the user explicitly picked — persisted across app launches.
+    private static var lastUsedTool: AnnotationTool = {
+        if let raw = UserDefaults.standard.object(forKey: "lastUsedTool") as? Int,
+           let tool = AnnotationTool(rawValue: raw) {
+            return tool
+        }
+        return .arrow
+    }()
     var currentTool: AnnotationTool = {
         let remember = UserDefaults.standard.object(forKey: "rememberLastTool") as? Bool ?? true
         return remember ? OverlayView.lastUsedTool : .arrow
@@ -175,6 +223,7 @@ class OverlayView: NSView {
             // Persist drawing tool choices; skip transient/mode tools
             if currentTool != .select && currentTool != .loupe {
                 OverlayView.lastUsedTool = currentTool
+                UserDefaults.standard.set(currentTool.rawValue, forKey: "lastUsedTool")
             }
         }
     }
@@ -265,7 +314,7 @@ class OverlayView: NSView {
     private var isDraggingAnnotation: Bool = false
     private var didMoveAnnotation: Bool = false
     private var annotationDragStart: NSPoint = .zero
-    /// When shift+clicking an already-selected annotation, defer the deselect
+    /// When ctrl+clicking an already-selected annotation, defer the deselect
     /// to mouseUp so the user can still drag the full multi-selection.
     private weak var shiftClickPendingDeselect: Annotation?
     /// Lasso selection: Ctrl+drag on empty space draws a marquee rectangle.
@@ -421,7 +470,7 @@ class OverlayView: NSView {
     var cachedEffectsScreenshot: NSImage?
 
     // Color picker target
-    enum ColorPickerTarget { case drawColor, textBg, textOutline, annotationOutline }
+    enum ColorPickerTarget { case drawColor, textBg, textOutline, textGlyphStroke, annotationOutline }
     private var colorPickerTarget: ColorPickerTarget = .drawColor
 
     // Beautify toolbar animation
@@ -822,17 +871,15 @@ class OverlayView: NSView {
             owner: self, userInfo: nil)
         addTrackingArea(area)
 
-        // Brief cooldown so the window server finishes compositing the overlay
-        // before we query CGWindowListCopyWindowInfo.
-        windowSnapCooldown = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { [weak self] in
-            guard let self = self else { return }
-            self.windowSnapCooldown = false
-            // Perform an initial snap query at the current mouse position so the
-            // highlight appears immediately without requiring the user to move the mouse.
-            if self.state == .idle && self.windowSnapEnabled && !self.windowSnapQueryInFlight {
-                self.queryWindowSnap(at: NSEvent.mouseLocation)
-            }
+        // Don't run the initial snap query here — it fires before the screenshot
+        // arrives (async capture). The snap query is triggered when screenshotImage
+        // is set (via didSet → needsDisplay → mouseMoved), or we kick it off
+        // explicitly in the screenshotImage setter below.
+        // Skip cooldown in editor mode — screenshotImage is set before the view
+        // moves to the window, so the didSet won't clear it. Window snap is
+        // irrelevant in editor anyway.
+        if !isEditorMode {
+            windowSnapCooldown = true
         }
 
         NotificationCenter.default.addObserver(
@@ -866,6 +913,16 @@ class OverlayView: NSView {
 
     override func mouseMoved(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
+
+        // Anchored selection (right-click in idle → track cursor without
+        // holding a button). Shares all modifier behaviour with drag-based
+        // selection via `updateAnchoredSelection` so Shift-constrain and
+        // the snap fallback in mouseUp still apply when the user commits.
+        if isAnchoredSelecting {
+            updateAnchoredSelection(to: point, event: event)
+            updateCursorForPoint(point)
+            return
+        }
 
         // Sticky color wheel: track hover with mouse movement
         if colorWheel.isVisible && colorWheel.isSticky {
@@ -1014,7 +1071,10 @@ class OverlayView: NSView {
     }
 
     override func resetCursorRects() {
-        // Handled imperatively in mouseMoved
+        super.resetCursorRects()
+        if !isEditorMode && !isScrollCapturing && !isRecording && (state == .idle || state == .selecting) {
+            addCursorRect(bounds, cursor: .crosshair)
+        }
     }
 
     /// Imperative cursor management. Called from mouseMoved and a 30fps timer.
@@ -1318,6 +1378,10 @@ class OverlayView: NSView {
     // MARK: - Drawing
 
     override func draw(_ dirtyRect: NSRect) {
+        timingMark?("OverlayView.draw begin state=\(state) screenshot=\(screenshotImage != nil) dirty=\(Int(dirtyRect.width))x\(Int(dirtyRect.height)) opaque=\(isOpaque)")
+        defer {
+            timingMark?("OverlayView.draw end")
+        }
         super.draw(dirtyRect)
 
         guard let context = NSGraphicsContext.current else { return }
@@ -1331,14 +1395,18 @@ class OverlayView: NSView {
             // live screen content everywhere (not just inside the selection).
             context.cgContext.clear(bounds)
         } else if !isRecording {
-            // Draw screenshot
             if let image = screenshotImage {
-                image.draw(in: bounds, from: .zero, operation: .copy, fraction: 1.0)
+                // Screenshot ready — draw it with dark overlay
+                if !usesExternalScreenshotPreview {
+                    image.draw(in: bounds, from: .zero, operation: .copy, fraction: 1.0)
+                }
+                NSColor.black.withAlphaComponent(0.45).setFill()
+                NSBezierPath(rect: bounds).fill()
+            } else {
+                // No screenshot yet — fully transparent. User sees live desktop
+                // through the overlay and can start selecting immediately.
+                context.cgContext.clear(bounds)
             }
-
-            // Draw dark overlay
-            NSColor.black.withAlphaComponent(0.45).setFill()
-            NSBezierPath(rect: bounds).fill()
         }
 
         // Window snap highlight (drawn before helper text so text appears on top)
@@ -1346,7 +1414,9 @@ class OverlayView: NSView {
 
         // Helper text
         if state == .idle {
-            drawIdleHelperText()
+            if screenshotImage != nil {
+                drawIdleHelperText()
+            }
         } else if state == .selecting {
             drawSelectingHelperText()
         }
@@ -1356,7 +1426,10 @@ class OverlayView: NSView {
             if shouldClipSelectionImage() {
                 context.saveGraphicsState()
                 NSBezierPath(rect: remoteSelectionRect).setClip()
-                if let image = screenshotImage {
+                if usesExternalScreenshotPreview && zoomLevel == 1 {
+                    context.cgContext.setBlendMode(.clear)
+                    NSBezierPath(rect: remoteSelectionRect).fill()
+                } else if let image = screenshotImage {
                     image.draw(in: bounds, from: .zero, operation: .copy, fraction: 1.0)
                 }
                 context.restoreGraphicsState()
@@ -1386,8 +1459,11 @@ class OverlayView: NSView {
             if shouldClipSelectionImage() {
                 context.saveGraphicsState()
                 NSBezierPath(rect: selectionRect).setClip()
-                applyZoomTransform(to: context)
-                if !isScrollCapturing, !isRecording, let image = screenshotImage {
+                if !isScrollCapturing, !isRecording, usesExternalScreenshotPreview, zoomLevel == 1 {
+                    context.cgContext.setBlendMode(.clear)
+                    NSBezierPath(rect: selectionRect).fill()
+                } else if !isScrollCapturing, !isRecording, let image = screenshotImage {
+                    applyZoomTransform(to: context)
                     image.draw(in: bounds, from: .zero, operation: .copy, fraction: 1.0)
                 }
                 context.restoreGraphicsState()
@@ -1397,9 +1473,11 @@ class OverlayView: NSView {
             let editorDrawnFromCache = (self as? EditorView)?.drewFromCompositeCache ?? false
 
             if !editorDrawnFromCache {
-                // Fast path: when not actively drawing, use a cached transparent image
-                // of all committed annotations instead of iterating them each frame.
-                if !isActivelyDrawing && !annotations.isEmpty && !isEditorMode {
+                // Use cached annotation layer whenever possible — even during active
+                // drawing. Committed annotations don't change while a new stroke is
+                // being drawn, so re-iterating them every frame wastes CPU and causes
+                // event coalescing (fewer mouse events → over-smoothed strokes).
+                if !annotations.isEmpty && !isEditorMode {
                     if (isDraggingAnnotation || isResizingAnnotation || isRotatingAnnotation),
                        let staticLayer = cachedAnnotationLayerExcludingSelected {
                         // During drag/resize: draw cached static annotations + selected ones live
@@ -1415,7 +1493,8 @@ class OverlayView: NSView {
                         applyCanvasTransform(to: context)
                         layer.draw(in: bounds, from: .zero, operation: .sourceOver, fraction: 1.0)
                     }
-                } else {
+                } else if !annotations.isEmpty {
+                    // Editor mode: no annotation layer cache, draw individually.
                     // Draw translate overlays clipped to selection (they must stay inside).
                     context.saveGraphicsState()
                     applyCanvasTransform(to: context)
@@ -2177,7 +2256,7 @@ class OverlayView: NSView {
         let pad = config.padding
         let cornerRadius = config.isWindowSnap ? 10 : config.cornerRadius  // native macOS corner radius for snapped windows
         let shadowRadius = config.shadowRadius
-        let shadowOffset = min(shadowRadius * 0.4, 10)
+        let shadowOffset = BeautifyRenderer.shadowOffset(for: shadowRadius)
 
         // Compute the expanded frame around the selection.
         // Shadow extends downward (negative Y in AppKit), so expand the origin down.
@@ -2271,16 +2350,9 @@ class OverlayView: NSView {
 
         // Drop shadow (not for snapped windows — handled via transparency layer below)
         if shadowRadius > 0 && !config.isWindowSnap {
-            NSGraphicsContext.saveGraphicsState()
-            let shadow = NSShadow()
-            shadow.shadowColor = NSColor.black.withAlphaComponent(0.35)
-            shadow.shadowBlurRadius = shadowRadius
-            shadow.shadowOffset = NSSize(width: 0, height: -shadowOffset)
-            shadow.set()
-            NSColor.white.setFill()
-            NSBezierPath(roundedRect: windowRect, xRadius: cornerRadius, yRadius: cornerRadius)
-                .fill()
-            NSGraphicsContext.restoreGraphicsState()
+            let shadowPath = NSBezierPath(
+                roundedRect: windowRect, xRadius: cornerRadius, yRadius: cornerRadius)
+            BeautifyRenderer.drawShadowedPath(shadowPath, radius: shadowRadius)
         }
 
         if config.isWindowSnap {
@@ -2290,11 +2362,37 @@ class OverlayView: NSView {
 
             // Drop shadow from the window shape
             if shadowRadius > 0 {
-                let shadow = NSShadow()
-                shadow.shadowColor = NSColor.black.withAlphaComponent(0.35)
-                shadow.shadowBlurRadius = shadowRadius
-                shadow.shadowOffset = NSSize(width: 0, height: -shadowOffset)
-                shadow.set()
+                context.cgContext.saveGState()
+                context.cgContext.setShadow(
+                    offset: CGSize(
+                        width: 0,
+                        height: -BeautifyRenderer.contactShadowOffset(for: shadowRadius)),
+                    blur: BeautifyRenderer.contactShadowBlur(for: shadowRadius),
+                    color: NSColor.black.withAlphaComponent(
+                        BeautifyRenderer.contactShadowAlpha(for: shadowRadius)).cgColor)
+                if let windowImg = snappedWindowImage {
+                    windowImg.draw(in: imageRect, from: .zero, operation: .sourceOver, fraction: 1.0)
+                } else if let image = screenshotImage {
+                    let drawImage = effectsActive ? effectsProcessedScreenshot(image) : image
+                    drawImage.draw(
+                        in: imageRect, from: selectionRect, operation: .sourceOver, fraction: 1.0)
+                }
+                context.cgContext.restoreGState()
+
+                context.cgContext.saveGState()
+                context.cgContext.setShadow(
+                    offset: CGSize(width: 0, height: -shadowOffset),
+                    blur: shadowRadius,
+                    color: NSColor.black.withAlphaComponent(
+                        BeautifyRenderer.shadowAlpha(for: shadowRadius)).cgColor)
+                if let windowImg = snappedWindowImage {
+                    windowImg.draw(in: imageRect, from: .zero, operation: .sourceOver, fraction: 1.0)
+                } else if let image = screenshotImage {
+                    let drawImage = effectsActive ? effectsProcessedScreenshot(image) : image
+                    drawImage.draw(
+                        in: imageRect, from: selectionRect, operation: .sourceOver, fraction: 1.0)
+                }
+                context.cgContext.restoreGState()
             }
 
             if let windowImg = snappedWindowImage {
@@ -2597,9 +2695,8 @@ class OverlayView: NSView {
 
         let w = cgImage.width
         let h = cgImage.height
-        // Use a known-good pixel format — the source image's bitmapInfo may be
-        // unsupported by CGContext (e.g. 16-bit float or unusual alpha layout).
-        let cs = CGColorSpaceCreateDeviceRGB()
+        // Preserve the source image's color space so colors stay correct.
+        let cs = cgImage.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!
         let bitmapInfo = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
         guard
             let ctx = CGContext(
@@ -2647,7 +2744,7 @@ class OverlayView: NSView {
 
         let w = cgImage.width
         let h = cgImage.height
-        let cs = CGColorSpaceCreateDeviceRGB()
+        let cs = cgImage.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!
         let bitmapInfo = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
         guard
             let ctx = CGContext(
@@ -2766,7 +2863,7 @@ class OverlayView: NSView {
         let newPxW = max(1, Int(newPtW * scale))
         let newPxH = max(1, Int(newPtH * scale))
 
-        let cs = oldCG.colorSpace ?? CGColorSpaceCreateDeviceRGB()
+        let cs = oldCG.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!
         guard let ctx = CGContext(
             data: nil, width: newPxW, height: newPxH,
             bitsPerComponent: 8, bytesPerRow: 0, space: cs,
@@ -3066,7 +3163,7 @@ class OverlayView: NSView {
 
         // Cache the bitmap context — only recreate if the image dimensions changed
         if autoMeasureBitmapCtx == nil || autoMeasureBitmapW != w || autoMeasureBitmapH != h {
-            let srgb = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+            let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
             guard let ctx = CGContext(
                 data: nil, width: w, height: h,
                 bitsPerComponent: 8, bytesPerRow: w * 4,
@@ -4443,9 +4540,28 @@ class OverlayView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
+
+        // Anchored selection commit: a left-click while the right-click-
+        // anchored tracker is live finalizes the selection and returns to
+        // the standard flow. Do this BEFORE any other mouseDown handling so
+        // we don't accidentally restart the selection from the click point.
+        if isAnchoredSelecting {
+            updateSelectionRect(to: point, shiftHeld: event.modifierFlags.contains(.shift))
+            commitAnchoredSelection()
+            return
+        }
+
         // Update pressure for tablet/Sidecar (0.0 for non-tablet events → treat as 1.0)
         let p = event.pressure
+        #if PRESSURE_EMULATION
+        // Debug: simulate pressure from mouse speed. Slow = heavy (1.0), fast = light (0.2).
+        // Uses deltaX/deltaY from the event to compute instantaneous speed.
+        let speed = hypot(event.deltaX, event.deltaY)
+        let simulated = max(0.2, min(1.0, 1.0 - speed / 40.0))
+        currentPressure = simulated
+        #else
         currentPressure = p > 0 ? CGFloat(p) : 1.0
+        #endif
 
         // Auto-measure: click to commit the preview annotation
         if autoMeasureKeyHeld, let preview = autoMeasurePreview {
@@ -4578,6 +4694,17 @@ class OverlayView: NSView {
         commitSizeInputIfNeeded()
         commitZoomInputIfNeeded()
 
+        // Double-click to copy: when the setting is on, two fast clicks inside the
+        // selection confirm the capture. Annotations the first click added (and any
+        // in-progress second-click annotation) are rewound first via the undo stack
+        // so the copied image looks like nothing was drawn during the double-click.
+        if state == .selected
+            && (UserDefaults.standard.object(forKey: "doubleClickToCopy") as? Bool ?? true)
+            && handleDoubleClickToCopy(event: event, at: point)
+        {
+            return
+        }
+
         switch state {
         case .idle:
             // Check remote selection handles for cross-screen resize
@@ -4672,20 +4799,12 @@ class OverlayView: NSView {
                 return
             }
 
-            // Outside everything - start new selection (locked during recording or editor mode)
-            guard shouldAllowNewSelection() else { return }
-            showToolbars = false
-            annotations.removeAll()
-            undoStack.removeAll()
-            redoStack.removeAll()
-            numberCounter = 0
-            resetZoom()
-            zoomLabelOpacity = 0.0
-            zoomFadeTimer?.invalidate()
-            selectionStart = point
-            selectionRect = NSRect(origin: point, size: .zero)
-            state = .selecting
-            overlayDelegate?.overlayViewDidBeginSelection()
+            // Outside the selection — historically this reset everything to
+            // start a new selection, but accidental clicks outside an
+            // established selection were destroying in-progress annotation
+            // work (#154). Treat outside clicks as a no-op once we have a
+            // committed selection; ESC still cancels deliberately.
+            return
             needsDisplay = true
 
         case .selecting:
@@ -4808,24 +4927,7 @@ class OverlayView: NSView {
 
         switch state {
         case .selecting:
-            if spaceRepositioning {
-                // Space held: move the origin without changing size
-                let dx = point.x - spaceRepositionLast.x
-                let dy = point.y - spaceRepositionLast.y
-                selectionStart.x += dx
-                selectionStart.y += dy
-                spaceRepositionLast = point
-            }
-            let rawW = abs(point.x - selectionStart.x)
-            let rawH = abs(point.y - selectionStart.y)
-            let shiftHeld = event.modifierFlags.contains(.shift)
-            let w = max(1, shiftHeld ? min(rawW, rawH) : rawW)
-            let h = max(1, shiftHeld ? min(rawW, rawH) : rawH)
-            let x = selectionStart.x < point.x ? selectionStart.x : selectionStart.x - w
-            let y = selectionStart.y < point.y ? selectionStart.y : selectionStart.y - h
-            selectionRect = NSRect(x: x, y: y, width: w, height: h)
-            overlayDelegate?.overlayViewSelectionDidChange(selectionRect)
-            needsDisplay = true
+            updateSelectionRect(to: point, shiftHeld: event.modifierFlags.contains(.shift))
 
         case .selected:
             // Convert to canvas space for annotation interactions (accounts for zoom)
@@ -5089,7 +5191,12 @@ class OverlayView: NSView {
                     spaceRepositionLast = canvasPoint
                 } else {
                     let p = event.pressure
+                    #if PRESSURE_EMULATION
+                    let speed = hypot(event.deltaX, event.deltaY)
+                    currentPressure = max(0.2, min(1.0, 1.0 - speed / 40.0))
+                    #else
                     currentPressure = p > 0 ? CGFloat(p) : 1.0
+                    #endif
                     updateAnnotation(
                         at: canvasPoint, shiftHeld: event.modifierFlags.contains(.shift))
                 }
@@ -5158,70 +5265,7 @@ class OverlayView: NSView {
         lastDragPoint = nil
         switch state {
         case .selecting:
-            if selectionRect.width > 5 || selectionRect.height > 5 {
-                // Real drag — use drawn rect as-is
-                state = .selected
-                if !autoOCRMode && !autoQuickSaveMode && !autoScrollCaptureMode && !autoConfirmMode { showToolbars = true }
-                overlayDelegate?.overlayViewDidFinishSelection(selectionRect)
-            } else if windowSnapEnabled, let snapRect = hoveredWindowRect, !snapRect.isEmpty {
-                // Click (no drag) with snap on — snap to hovered window
-                selectionRect = snapRect
-                selectionIsWindowSnap = true
-                snappedWindowID = hoveredWindowID
-                // Capture the window independently for beautify (transparent corners)
-                if let wid = hoveredWindowID, let screen = window?.screen {
-                    Task {
-                        if let cgImage = await ScreenCaptureManager.captureWindow(windowID: wid, screen: screen) {
-                            self.snappedWindowImage = NSImage(cgImage: cgImage,
-                                size: NSSize(width: CGFloat(cgImage.width) / screen.backingScaleFactor,
-                                             height: CGFloat(cgImage.height) / screen.backingScaleFactor))
-                            self.needsDisplay = true
-                        }
-                    }
-                }
-                state = .selected
-                if !autoOCRMode && !autoQuickSaveMode && !autoScrollCaptureMode && !autoConfirmMode { showToolbars = true }
-                overlayDelegate?.overlayViewDidFinishSelection(selectionRect)
-            } else {
-                // Click (no drag), snap off — expand to full screen
-                selectionRect = bounds
-                state = .selected
-                if !autoOCRMode && !autoQuickSaveMode && !autoScrollCaptureMode && !autoConfirmMode { showToolbars = true }
-                overlayDelegate?.overlayViewDidFinishSelection(selectionRect)
-            }
-            hoveredWindowRect = nil
-            // Update cursor to match the selected tool (replaces resize cursor from dragging)
-            if let win = window {
-                let point = convert(win.mouseLocationOutsideOfEventStream, from: nil)
-                updateCursorForPoint(point)
-            }
-            scheduleBarcodeDetection()
-            // Auto-enter recording mode if triggered from "Record Screen"
-            if autoEnterRecordingMode {
-                autoEnterRecordingMode = false
-                overlayDelegate?.overlayViewDidRequestEnterRecordingMode()
-            }
-            // Auto-trigger OCR if triggered from "Capture OCR"
-            if autoOCRMode {
-                autoOCRMode = false
-                overlayDelegate?.overlayViewDidRequestOCR()
-            }
-            // Auto-trigger quick save if triggered from "Quick Capture"
-            if autoQuickSaveMode {
-                autoQuickSaveMode = false
-                overlayDelegate?.overlayViewDidRequestQuickSave()
-            }
-            // Auto-trigger scroll capture if triggered from "Scroll Capture"
-            if autoScrollCaptureMode {
-                autoScrollCaptureMode = false
-                overlayDelegate?.overlayViewDidRequestScrollCapture(rect: selectionRect)
-            }
-            // Auto-confirm for "Add Capture" — just confirm selection, no save/copy
-            if autoConfirmMode {
-                autoConfirmMode = false
-                overlayDelegate?.overlayViewDidConfirm()
-            }
-            needsDisplay = true
+            finishSelection()
 
         case .selected:
             if isLassoSelecting {
@@ -5236,7 +5280,7 @@ class OverlayView: NSView {
                 lassoRect = .zero
                 needsDisplay = true
             } else if isDraggingAnnotation {
-                // Deferred shift+click deselect: only remove the annotation if
+                // Deferred ctrl+click deselect: only remove the annotation if
                 // the user didn't drag (i.e. it was a click, not a move).
                 if let pending = shiftClickPendingDeselect {
                     shiftClickPendingDeselect = nil
@@ -5281,12 +5325,241 @@ class OverlayView: NSView {
         }
     }
 
+    /// Handle the "double-click to copy" feature. Called from `mouseDown` when the setting
+    /// is enabled and `state == .selected`. Returns true when the event was consumed.
+    ///
+    /// On the first click we snapshot the undo-stack depth. On the second click (clickCount >= 2)
+    /// inside the selection we rewind the stack to that snapshot — removing any annotation the
+    /// first click finished — cancel any in-progress drawing, then trigger confirm.
+    private func handleDoubleClickToCopy(event: NSEvent, at point: NSPoint) -> Bool {
+        // Defer to existing text/select double-click behavior when clicking directly on a
+        // text annotation — those paths already handle clickCount >= 2 (enter edit mode).
+        if currentTool == .text || currentTool == .select {
+            let hitText = annotations.reversed().first(where: {
+                $0.tool == .text && $0.hitTest(point: point)
+            })
+            if hitText != nil { return false }
+        }
+        // Don't intercept while a text editor is open — the user is typing, not double-clicking.
+        if textEditView != nil { return false }
+
+        if event.clickCount >= 2 {
+            guard pointIsInSelection(point) else {
+                // Outside selection: no drawing occurred — just confirm.
+                doubleClickUndoBaseline = nil
+                overlayDelegate?.overlayViewDidConfirm()
+                return true
+            }
+            // Cancel any in-progress annotation from this second click.
+            currentAnnotation = nil
+            // Rewind the undo stack to the baseline captured on the first click,
+            // popping the annotation(s) the first click finished.
+            if let baseline = doubleClickUndoBaseline {
+                while undoStack.count > baseline { undo() }
+            }
+            doubleClickUndoBaseline = nil
+            // Clear caches so the confirm renders without the popped annotations.
+            cachedCompositedImage = nil
+            cachedAnnotationLayer = nil
+            overlayDelegate?.overlayViewDidConfirm()
+            return true
+        }
+
+        // clickCount == 1: record the baseline so the next click (if it doubles up)
+        // knows how far to rewind. Only record when the click could plausibly create
+        // an annotation (inside selection, drawing tool). Otherwise leave it nil so
+        // a double-click outside still works without an unrelated baseline.
+        if pointIsInSelection(point) {
+            doubleClickUndoBaseline = undoStack.count
+        } else {
+            doubleClickUndoBaseline = nil
+        }
+        return false
+    }
+
+    private func finishSelection() {
+        if selectionRect.width > 5 || selectionRect.height > 5 {
+            // Real drag — use drawn rect as-is
+            state = .selected
+            if !autoOCRMode && !autoQuickSaveMode && !autoScrollCaptureMode && !autoConfirmMode { showToolbars = true }
+            overlayDelegate?.overlayViewDidFinishSelection(selectionRect)
+        } else if windowSnapEnabled, let snapRect = hoveredWindowRect, !snapRect.isEmpty {
+            // Click (no drag) with snap on — snap to hovered window
+            selectionRect = snapRect
+            selectionIsWindowSnap = true
+            snappedWindowID = hoveredWindowID
+            // Capture the window independently for beautify (transparent corners)
+            if let wid = hoveredWindowID, let screen = window?.screen {
+                Task {
+                    if let cgImage = await ScreenCaptureManager.captureWindow(windowID: wid, screen: screen) {
+                        self.snappedWindowImage = NSImage(cgImage: cgImage,
+                            size: NSSize(width: CGFloat(cgImage.width) / screen.backingScaleFactor,
+                                         height: CGFloat(cgImage.height) / screen.backingScaleFactor))
+                        self.needsDisplay = true
+                    }
+                }
+            }
+            state = .selected
+            if !autoOCRMode && !autoQuickSaveMode && !autoScrollCaptureMode && !autoConfirmMode { showToolbars = true }
+            overlayDelegate?.overlayViewDidFinishSelection(selectionRect)
+        } else {
+            // Click (no drag), snap off — expand to full screen
+            selectionRect = bounds
+            state = .selected
+            if !autoOCRMode && !autoQuickSaveMode && !autoScrollCaptureMode && !autoConfirmMode { showToolbars = true }
+            overlayDelegate?.overlayViewDidFinishSelection(selectionRect)
+        }
+        hoveredWindowRect = nil
+        // Update cursor to match the selected tool (replaces resize cursor from dragging)
+        if let win = window {
+            let point = convert(win.mouseLocationOutsideOfEventStream, from: nil)
+            updateCursorForPoint(point)
+        }
+        scheduleBarcodeDetection()
+        // Auto-enter recording mode if triggered from "Record Screen"
+        if autoEnterRecordingMode {
+            autoEnterRecordingMode = false
+            overlayDelegate?.overlayViewDidRequestEnterRecordingMode()
+        }
+        // Auto-trigger OCR if triggered from "Capture OCR"
+        if autoOCRMode {
+            autoOCRMode = false
+            overlayDelegate?.overlayViewDidRequestOCR()
+        }
+        // Auto-trigger quick save if triggered from "Quick Capture"
+        if autoQuickSaveMode {
+            autoQuickSaveMode = false
+            overlayDelegate?.overlayViewDidRequestQuickSave()
+        }
+        // Auto-trigger scroll capture if triggered from "Scroll Capture"
+        if autoScrollCaptureMode {
+            autoScrollCaptureMode = false
+            overlayDelegate?.overlayViewDidRequestScrollCapture(rect: selectionRect)
+        }
+        // Auto-confirm for "Add Capture" — just confirm selection, no save/copy
+        if autoConfirmMode {
+            autoConfirmMode = false
+            overlayDelegate?.overlayViewDidConfirm()
+        }
+        needsDisplay = true
+    }
+
+    /// Update `selectionRect` from the anchor at `selectionStart` to the
+    /// current cursor point. Honors Shift (constrain to square) and Space
+    /// (reposition anchor). Shared between drag-to-select (mouseDragged)
+    /// and right-click-anchored select (mouseMoved) so both flows produce
+    /// identical geometry.
+    private func updateSelectionRect(to point: NSPoint, shiftHeld: Bool) {
+        if spaceRepositioning {
+            let dx = point.x - spaceRepositionLast.x
+            let dy = point.y - spaceRepositionLast.y
+            selectionStart.x += dx
+            selectionStart.y += dy
+            spaceRepositionLast = point
+        }
+        let rawW = abs(point.x - selectionStart.x)
+        let rawH = abs(point.y - selectionStart.y)
+        let w = max(1, shiftHeld ? min(rawW, rawH) : rawW)
+        let h = max(1, shiftHeld ? min(rawW, rawH) : rawH)
+        let x = selectionStart.x < point.x ? selectionStart.x : selectionStart.x - w
+        let y = selectionStart.y < point.y ? selectionStart.y : selectionStart.y - h
+        selectionRect = NSRect(x: x, y: y, width: w, height: h)
+        overlayDelegate?.overlayViewSelectionDidChange(selectionRect)
+        needsDisplay = true
+    }
+
+    /// mouseMoved entry point when the right-click-anchored mode is active.
+    /// Kept separate from the drag path so cross-screen tracking and other
+    /// mouseDragged-only features don't get accidentally invoked.
+    private func updateAnchoredSelection(to point: NSPoint, event: NSEvent) {
+        updateSelectionRect(to: point, shiftHeld: event.modifierFlags.contains(.shift))
+    }
+
+    /// Commit an anchored selection — matches the branch in mouseUp that
+    /// fires after a drag-to-select, so the same snap-to-window /
+    /// fallback-to-fullscreen logic applies when the user confirms with a
+    /// tiny (no-move) rectangle.
+    private func commitAnchoredSelection() {
+        isAnchoredSelecting = false
+        if selectionRect.width > 5 || selectionRect.height > 5 {
+            state = .selected
+            if !autoOCRMode && !autoQuickSaveMode && !autoScrollCaptureMode && !autoConfirmMode {
+                showToolbars = true
+            }
+            overlayDelegate?.overlayViewDidFinishSelection(selectionRect)
+        } else if windowSnapEnabled, let snapRect = hoveredWindowRect, !snapRect.isEmpty {
+            selectionRect = snapRect
+            selectionIsWindowSnap = true
+            snappedWindowID = hoveredWindowID
+            if let wid = hoveredWindowID, let screen = window?.screen {
+                Task {
+                    if let cgImage = await ScreenCaptureManager.captureWindow(windowID: wid, screen: screen) {
+                        self.snappedWindowImage = NSImage(
+                            cgImage: cgImage,
+                            size: NSSize(
+                                width: CGFloat(cgImage.width) / screen.backingScaleFactor,
+                                height: CGFloat(cgImage.height) / screen.backingScaleFactor))
+                        self.needsDisplay = true
+                    }
+                }
+            }
+            state = .selected
+            if !autoOCRMode && !autoQuickSaveMode && !autoScrollCaptureMode && !autoConfirmMode {
+                showToolbars = true
+            }
+            overlayDelegate?.overlayViewDidFinishSelection(selectionRect)
+        } else {
+            selectionRect = bounds
+            state = .selected
+            if !autoOCRMode && !autoQuickSaveMode && !autoScrollCaptureMode && !autoConfirmMode {
+                showToolbars = true
+            }
+            overlayDelegate?.overlayViewDidFinishSelection(selectionRect)
+        }
+        hoveredWindowRect = nil
+        if let win = window {
+            updateCursorForPoint(convert(win.mouseLocationOutsideOfEventStream, from: nil))
+        }
+        scheduleBarcodeDetection()
+        needsDisplay = true
+    }
+
+    /// Cancel anchored-selection mode (ESC). Resets back to idle without
+    /// leaving a tiny selection behind.
+    private func cancelAnchoredSelection() {
+        guard isAnchoredSelecting else { return }
+        isAnchoredSelecting = false
+        selectionRect = .zero
+        state = .idle
+        overlayDelegate?.overlayViewSelectionDidChange(.zero)
+        needsDisplay = true
+    }
+
     override func rightMouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
 
         // Text Fill/Outline color picking handled by ToolOptionsRowView
 
         // Toolbar right-clicks handled by ToolbarButtonView.onRightClick → handleToolbarButtonRightClick
+
+        // Anchored selection toggle: right-click in idle starts no-hold
+        // tracking from that point; a second right-click while tracking
+        // commits. Left-click during tracking also commits (handled in
+        // mouseDown). ESC cancels. Locked during recording and editor mode.
+        if isAnchoredSelecting {
+            updateSelectionRect(to: point, shiftHeld: event.modifierFlags.contains(.shift))
+            commitAnchoredSelection()
+            return
+        }
+        if state == .idle && shouldAllowNewSelection() {
+            selectionStart = point
+            selectionRect = NSRect(origin: point, size: .zero)
+            state = .selecting
+            isAnchoredSelecting = true
+            overlayDelegate?.overlayViewDidBeginSelection()
+            needsDisplay = true
+            return
+        }
 
         // Right-click on a line/arrow/measure: add anchor point.
         // Auto-selects the annotation if it isn't selected yet.
@@ -6218,6 +6491,29 @@ class OverlayView: NSView {
         }
     }
 
+    /// Apply current glyph-stroke state to the live NSTextView (if open).
+    /// Touches existing text + future typing so the change is visible immediately.
+    func applyGlyphStrokeToLiveTextView() {
+        guard let tv = textEditor.textView, let storage = tv.textStorage else { return }
+        let range = NSRange(location: 0, length: storage.length)
+        if textEditor.glyphStrokeEnabled {
+            if range.length > 0 {
+                storage.addAttribute(.strokeColor, value: textEditor.glyphStrokeColor, range: range)
+                storage.addAttribute(.strokeWidth, value: -6.0, range: range)
+            }
+            tv.typingAttributes[.strokeColor] = textEditor.glyphStrokeColor
+            tv.typingAttributes[.strokeWidth] = -6.0
+        } else {
+            if range.length > 0 {
+                storage.removeAttribute(.strokeColor, range: range)
+                storage.removeAttribute(.strokeWidth, range: range)
+            }
+            tv.typingAttributes.removeValue(forKey: .strokeColor)
+            tv.typingAttributes.removeValue(forKey: .strokeWidth)
+        }
+        tv.needsDisplay = true
+    }
+
     /// Apply text background/outline toggle to selected text annotations.
     func applyTextBgOutlineToSelectedAnnotations() {
         guard textEditor.textView == nil else { return }
@@ -6225,6 +6521,8 @@ class OverlayView: NSView {
         for ann in selectedAnnotations where ann.tool == .text {
             ann.textBgColor = textEditor.bgEnabled ? textEditor.bgColor : nil
             ann.textOutlineColor = textEditor.outlineEnabled ? textEditor.outlineColor : nil
+            ann.textGlyphStrokeColor = textEditor.glyphStrokeEnabled ? textEditor.glyphStrokeColor : nil
+            ann.reRenderTextImage()
             changed = true
         }
         if changed {
@@ -6276,31 +6574,36 @@ class OverlayView: NSView {
             }
         }
 
-        // Click-to-select body: for pencil/marker, only instant-select when Shift is held
-        // (otherwise they use long-press below to avoid accidental selection while drawing).
-        // Text tool: use instant-select when Shift is held (multi-select) or when clicking
-        // on an already-selected annotation (allows multi-drag).
-        let shiftHeld = NSEvent.modifierFlags.contains(.shift)
-        let textHasSelection = currentTool == .text && !selectedAnnotations.isEmpty
+        // Click-to-select body: Ctrl+click adds/removes from multi-selection
+        // (consistent with Ctrl+drag for lasso). Shift is reserved for angle/shape
+        // constraining during drawing.
+        // For pencil/marker, only instant-select when Ctrl is held or a multi-selection
+        // already exists (so the user can drag the group without a modifier).
+        // Text tool: allow selecting annotations on click; only skip instant-select
+        // when clicking empty space (where a new text box should be created).
+        let ctrlHeld = NSEvent.modifierFlags.contains(.control)
+        let pencilHasMultiSelection = isPencilOrMarker && selectedAnnotations.count > 1
+        let textHitsAnnotation = currentTool == .text
+            && annotations.reversed().contains(where: { $0.isMovable && $0.hitTest(point: point) })
         let useInstantSelect = currentTool != .colorSampler
-            && (currentTool != .text || shiftHeld || textHasSelection)
-            && (!isPencilOrMarker || shiftHeld)
+            && (currentTool != .text || ctrlHeld || textHitsAnnotation)
+            && (!isPencilOrMarker || ctrlHeld || pencilHasMultiSelection)
         if useInstantSelect {
             if let clicked = annotations.reversed().first(where: { $0.isMovable && $0.hitTest(point: point) }) {
                 shiftClickPendingDeselect = nil
-                if shiftHeld {
+                if ctrlHeld {
                     if isSelected(clicked) {
                         // Defer deselect to mouseUp — allows dragging the full
-                        // multi-selection even when shift+clicking a selected item.
+                        // multi-selection even when ctrl+clicking a selected item.
                         shiftClickPendingDeselect = clicked
                     } else {
                         selectedAnnotations.append(clicked)
                     }
                 } else if !isSelected(clicked) {
-                    // Not Shift, not already selected: replace selection
+                    // Not Ctrl, not already selected: replace selection
                     selectedAnnotation = clicked
                 }
-                // If already selected without Shift: keep current selection (allows multi-drag)
+                // If already selected without Ctrl: keep current selection (allows multi-drag)
                 isDraggingAnnotation = true
                 didMoveAnnotation = false
                 annotationDragStart = point
@@ -6312,10 +6615,19 @@ class OverlayView: NSView {
             }
         }
 
-        // Pencil/marker without Shift: start a long-press timer. If the user holds
+        // Ctrl+click on empty space — start lasso marquee selection
+        if ctrlHeld {
+            isLassoSelecting = true
+            lassoStart = point
+            lassoRect = .zero
+            needsDisplay = true
+            return
+        }
+
+        // Pencil/marker without Ctrl: start a long-press timer. If the user holds
         // still for 300ms on an annotation, select it. Otherwise drawing starts
         // normally (the timer is cancelled in mouseDragged when movement exceeds 3px).
-        if isPencilOrMarker && !shiftHeld {
+        if isPencilOrMarker && !ctrlHeld {
             let hasAnnotationUnder = annotations.reversed().contains(where: { $0.isMovable && $0.hitTest(point: point) })
             if hasAnnotationUnder {
                 longPressPoint = point
@@ -6328,7 +6640,7 @@ class OverlayView: NSView {
                     // Select the annotation under the long-press point
                     if let clicked = self.annotations.reversed().first(where: { $0.isMovable && $0.hitTest(point: point) }) {
                         self.shiftClickPendingDeselect = nil
-                        if NSEvent.modifierFlags.contains(.shift) {
+                        if NSEvent.modifierFlags.contains(.control) {
                             if self.isSelected(clicked) {
                                 self.shiftClickPendingDeselect = clicked
                             } else {
@@ -6349,15 +6661,6 @@ class OverlayView: NSView {
                     }
                 }
             }
-        }
-
-        // Ctrl+click on empty space — start lasso marquee selection
-        if NSEvent.modifierFlags.contains(.control) {
-            isLassoSelecting = true
-            lassoStart = point
-            lassoRect = .zero
-            needsDisplay = true
-            return
         }
 
         // Clicking empty space — clear selection and start new annotation
@@ -6808,11 +7111,14 @@ class OverlayView: NSView {
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         // Forward Cmd shortcuts to the text view when editing — the main menu
         // intercepts these before keyDown reaches the overlay window.
-        if event.modifierFlags.contains(.command), let char = event.charactersIgnoringModifiers {
+        // Use keyCode (hardware-based) instead of charactersIgnoringModifiers
+        // so shortcuts work regardless of keyboard layout (e.g. Russian, Arabic).
+        if event.modifierFlags.contains(.command) {
+            let key = event.keyCode
             // Text editing: forward to NSTextView (only when text is actively selected)
             if let tv = textEditView {
-                switch char {
-                case "c":
+                switch key {
+                case 8:  // C
                     if tv.selectedRange().length > 0 {
                         tv.copy(nil)
                     } else {
@@ -6827,7 +7133,7 @@ class OverlayView: NSView {
                         needsDisplay = true
                     }
                     return true
-                case "v":
+                case 9:  // V
                     if NSPasteboard.general.data(forType: Self.annotationPasteboardType) != nil {
                         commitTextFieldIfNeeded()
                         pasteAnnotations()
@@ -6837,9 +7143,9 @@ class OverlayView: NSView {
                         tv.paste(nil)
                     }
                     return true
-                case "x": tv.cut(nil); return true
-                case "a": tv.selectAll(nil); return true
-                case "z":
+                case 7: tv.cut(nil); return true  // X
+                case 0: tv.selectAll(nil); return true  // A
+                case 6:  // Z
                     if event.modifierFlags.contains(.shift) { tv.undoManager?.redo() }
                     else { tv.undoManager?.undo() }
                     return true
@@ -6849,15 +7155,15 @@ class OverlayView: NSView {
 
             // Annotation copy/paste (no text editing active)
             if state == .selected {
-                switch char {
-                case "c":
+                switch key {
+                case 8:  // C
                     if !selectedAnnotations.isEmpty {
                         copySelectedAnnotations()
                     } else {
                         overlayDelegate?.overlayViewDidConfirm()
                     }
                     return true
-                case "v":
+                case 9:  // V
                     if NSPasteboard.general.data(forType: Self.annotationPasteboardType) != nil {
                         pasteAnnotations()
                         return true
@@ -6868,12 +7174,12 @@ class OverlayView: NSView {
 
             // Canvas undo/redo — intercept before main menu consumes the event
             if state == .selected {
-                switch char {
-                case "z":
+                switch key {
+                case 6:  // Z
                     if event.modifierFlags.contains(.shift) { redo() }
                     else { undo() }
                     return true
-                case "y":
+                case 16:  // Y
                     redo()
                     return true
                 default: break
@@ -6919,6 +7225,10 @@ class OverlayView: NSView {
         case 53:  // Escape
             if isScrollCapturing {
                 overlayDelegate?.overlayViewDidRequestStopScrollCapture()
+                return
+            }
+            if isAnchoredSelecting {
+                cancelAnchoredSelection()
                 return
             }
             if colorWheel.isVisible && colorWheel.isSticky {
@@ -6996,9 +7306,12 @@ class OverlayView: NSView {
             {
                 if let char = event.charactersIgnoringModifiers?.lowercased(),
                    let action = ToolShortcutManager.lookupAction(for: char) {
-                    if case .detach = action {
+                    switch action {
+                    case .detach:
                         if shouldAllowDetach() { handleToolbarAction(.detach) }
-                    } else {
+                    case .pin, .scrollCapture:
+                        if !isEditorMode { handleToolbarAction(action) }
+                    default:
                         handleToolbarAction(action)
                     }
                     return
@@ -7007,7 +7320,8 @@ class OverlayView: NSView {
             if event.modifierFlags.contains(.command) {
                 // Cmd+C, Cmd+V, Cmd+X, Cmd+A, Cmd+Z are handled in performKeyEquivalent.
                 // Only Cmd+S and zoom shortcuts remain here.
-                if event.charactersIgnoringModifiers == "s" {
+                // Use keyCode for letters so shortcuts work with any keyboard layout.
+                if event.keyCode == 1 {  // S
                     if state == .selected {
                         overlayDelegate?.overlayViewDidRequestSave()
                     }
@@ -7249,7 +7563,7 @@ class OverlayView: NSView {
         let scale = window?.backingScaleFactor ?? 2.0
         let pxW = Int(ceil(size.width * scale))
         let pxH = Int(ceil(size.height * scale))
-        let colorSpace = window?.screen?.colorSpace?.cgColorSpace ?? CGColorSpaceCreateDeviceRGB()
+        let colorSpace = window?.screen?.colorSpace?.cgColorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!
         guard let cgCtx = CGContext(
             data: nil, width: pxW, height: pxH,
             bitsPerComponent: 8, bytesPerRow: 0,
@@ -7287,7 +7601,7 @@ class OverlayView: NSView {
         let scale = window?.backingScaleFactor ?? 2.0
         let pxW = Int(ceil(size.width * scale))
         let pxH = Int(ceil(size.height * scale))
-        let colorSpace = window?.screen?.colorSpace?.cgColorSpace ?? CGColorSpaceCreateDeviceRGB()
+        let colorSpace = window?.screen?.colorSpace?.cgColorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!
         guard let cgCtx = CGContext(
             data: nil, width: pxW, height: pxH,
             bitsPerComponent: 8, bytesPerRow: 0,
@@ -7318,7 +7632,7 @@ class OverlayView: NSView {
     /// Used as source for pixelate/blur so they operate on the composited result.
     func compositedImage() -> NSImage? {
         if let cached = cachedCompositedImage { return cached }
-        guard let screenshot = screenshotImage else { return nil }
+        guard let screenshot = captureSourceImage ?? screenshotImage else { return nil }
         if annotations.isEmpty { return screenshot }
 
         let drawRect = captureDrawRect
@@ -7369,7 +7683,7 @@ class OverlayView: NSView {
         // prevents interpolation-upscaling when a 1x external monitor is
         // captured while a Retina display is also connected.
         let scale: CGFloat
-        if let screenshot = screenshotImage,
+        if let screenshot = captureSourceImage ?? screenshotImage,
             let cg = screenshot.cgImage(forProposedRect: nil, context: nil, hints: nil)
         {
             scale = CGFloat(cg.width) / screenshot.size.width
@@ -7377,17 +7691,28 @@ class OverlayView: NSView {
             scale = window?.backingScaleFactor ?? 2.0
         }
 
-        let pixelW = Int(selectionRect.width * scale)
-        let pixelH = Int(selectionRect.height * scale)
+        // Snap selection rect to pixel boundaries to prevent sub-pixel
+        // interpolation blur (especially visible on 1x non-Retina displays
+        // where fractional mouse coordinates aren't absorbed by 2x scaling).
+        let snappedRect = NSRect(
+            x: round(selectionRect.origin.x * scale) / scale,
+            y: round(selectionRect.origin.y * scale) / scale,
+            width: round(selectionRect.width * scale) / scale,
+            height: round(selectionRect.height * scale) / scale
+        )
+
+        let pixelW = Int(snappedRect.width * scale)
+        let pixelH = Int(snappedRect.height * scale)
+        guard pixelW > 0, pixelH > 0 else { return nil }
         // Use the source image's color space to avoid expensive color conversion on render.
         // Fall back to sRGB if unavailable.
         let cs: CGColorSpace
-        if let screenshot = screenshotImage,
+        if let screenshot = captureSourceImage ?? screenshotImage,
            let cg = screenshot.cgImage(forProposedRect: nil, context: nil, hints: nil),
            let srcCS = cg.colorSpace {
             cs = srcCS
         } else {
-            cs = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+            cs = CGColorSpace(name: CGColorSpace.sRGB)!
         }
         let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
         guard
@@ -7401,15 +7726,18 @@ class OverlayView: NSView {
             )
         else { return nil }
 
+        // Disable interpolation for pixel-perfect output — the screenshot
+        // pixels should map 1:1 to the output without any filtering.
+        cgCtx.interpolationQuality = .none
         // Scale the CG context so drawing in points maps to the correct pixels.
         cgCtx.scaleBy(x: scale, y: scale)
-        cgCtx.translateBy(x: -selectionRect.origin.x, y: -selectionRect.origin.y)
+        cgCtx.translateBy(x: -snappedRect.origin.x, y: -snappedRect.origin.y)
 
         let nsContext = NSGraphicsContext(cgContext: cgCtx, flipped: false)
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = nsContext
 
-        if let screenshot = screenshotImage {
+        if let screenshot = captureSourceImage ?? screenshotImage {
             // In editor mode the image is at selectionRect (natural size);
             // in overlay mode it fills bounds (full screen).
             let drawRect = captureDrawRect
@@ -7425,7 +7753,7 @@ class OverlayView: NSView {
         NSGraphicsContext.restoreGraphicsState()
 
         guard let cgImage = cgCtx.makeImage() else { return nil }
-        return NSImage(cgImage: cgImage, size: selectionRect.size)
+        return NSImage(cgImage: cgImage, size: snappedRect.size)
     }
 
     // MARK: - Cleanup
@@ -7542,6 +7870,7 @@ class OverlayView: NSView {
         case .drawColor: initialColor = currentColor
         case .textBg: initialColor = textEditor.bgColor
         case .textOutline: initialColor = textEditor.outlineColor
+        case .textGlyphStroke: initialColor = textEditor.glyphStrokeColor
         case .annotationOutline:
             if let data = UserDefaults.standard.data(forKey: "annotationOutlineColor"),
                let c = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSColor.self, from: data) {
@@ -7604,6 +7933,13 @@ class OverlayView: NSView {
             if let data = try? NSKeyedArchiver.archivedData(withRootObject: color, requiringSecureCoding: false) {
                 UserDefaults.standard.set(data, forKey: "textOutlineColor")
             }
+        case .textGlyphStroke:
+            textEditor.glyphStrokeColor = color
+            if let data = try? NSKeyedArchiver.archivedData(withRootObject: color, requiringSecureCoding: false) {
+                UserDefaults.standard.set(data, forKey: "textGlyphStrokeColor")
+            }
+            applyGlyphStrokeToLiveTextView()
+            applyTextBgOutlineToSelectedAnnotations()
         case .annotationOutline:
             if let data = try? NSKeyedArchiver.archivedData(withRootObject: color, requiringSecureCoding: false) {
                 UserDefaults.standard.set(data, forKey: "annotationOutlineColor")
@@ -7637,6 +7973,7 @@ class OverlayView: NSView {
         PopoverHelper.dismiss()
         editorTooltipView?.removeFromSuperview()
         editorTooltipView = nil
+        captureSourceImage = nil
         isTranslating = false
         translateEnabled = false
         autoMeasurePreview = nil
@@ -7683,6 +8020,18 @@ class OverlayView: NSView {
         barcodeDetector.cancel()
         hoveredWindowRect = nil
         isRecording = false
+        // Webcam setup preview (if any) — clear so a reused overlay doesn't
+        // show a stale camera feed on the next session.
+        webcamSetupPreview?.stopPreview()
+        webcamSetupPreview?.close()
+        webcamSetupPreview = nil
+        // Auto-mode flags — these are set per-session by the controller and
+        // must NOT leak into the next session.
+        autoEnterRecordingMode = false
+        autoOCRMode = false
+        autoQuickSaveMode = false
+        autoScrollCaptureMode = false
+        autoConfirmMode = false
         needsDisplay = true
     }
 }
@@ -7791,4 +8140,3 @@ private class TooltipBackgroundView: NSView {
         (text as NSString).draw(at: NSPoint(x: pad, y: pad / 2), withAttributes: attrs)
     }
 }
-

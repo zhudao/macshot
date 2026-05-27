@@ -71,6 +71,10 @@ class ToolOptionsRowView: NSView {
         if let swatch = viewWithTag(976) {
             swatch.layer?.backgroundColor = ov.textEditor.outlineColor.cgColor
         }
+        // Text glyph-stroke swatch (tag 977)
+        if let swatch = viewWithTag(977) {
+            swatch.layer?.backgroundColor = ov.textEditor.glyphStrokeColor.cgColor
+        }
         // Annotation outline swatch (tag 978)
         if let swatch = viewWithTag(978) {
             let col = editingAnnotation?.outlineColor ?? Self.savedOutlineColor
@@ -141,10 +145,9 @@ class ToolOptionsRowView: NSView {
                     self?.ensureSnapshot()
                     ann.arrowReversed = isOn
                     ov?.cachedCompositedImage = nil
-                } else {
-                    ov?.arrowReversed = isOn
-                    UserDefaults.standard.set(isOn, forKey: "arrowReversed")
                 }
+                ov?.arrowReversed = isOn
+                UserDefaults.standard.set(isOn, forKey: "arrowReversed")
                 ov?.needsDisplay = true
             }
         }
@@ -410,7 +413,12 @@ class ToolOptionsRowView: NSView {
             seg.setLabel(mode.label, forSegment: i)
             seg.setWidth(0, forSegment: i)
         }
-        let currentMode = CensorMode(rawValue: UserDefaults.standard.integer(forKey: "censorMode")) ?? .pixelate
+        let currentMode: CensorMode
+        if let ann = editingAnnotation, ann.tool == .pixelate || ann.tool == .blur {
+            currentMode = ann.censorMode
+        } else {
+            currentMode = CensorMode(rawValue: UserDefaults.standard.integer(forKey: "censorMode")) ?? .pixelate
+        }
         seg.selectedSegment = currentMode.rawValue
         seg.sizeToFit()
         seg.frame = NSRect(x: curX, y: (rowHeight - 22) / 2, width: seg.frame.width, height: 22)
@@ -543,23 +551,56 @@ class ToolOptionsRowView: NSView {
                 path.line(to: NSPoint(x: to.x - 5, y: mid - 3))
                 path.stroke()
             case .tail:
+                // Filled circle at the start matches what the renderer actually draws.
+                let tailR: CGFloat = 2.6
+                let tailCircle = NSBezierPath(ovalIn: NSRect(
+                    x: from.x - tailR, y: mid - tailR,
+                    width: tailR * 2, height: tailR * 2))
+                tailCircle.fill()
                 let path = NSBezierPath()
                 path.lineWidth = 1.5
-                path.move(to: from)
+                path.move(to: NSPoint(x: from.x + tailR, y: mid))
                 path.line(to: NSPoint(x: to.x - 4, y: mid))
                 path.stroke()
-                // Tail crossbar — taller so it's clearly a line, not a dot
-                let tail = NSBezierPath()
-                tail.lineWidth = 1.5
-                tail.move(to: NSPoint(x: from.x, y: mid + 5))
-                tail.line(to: NSPoint(x: from.x, y: mid - 5))
-                tail.stroke()
                 let head = NSBezierPath()
                 head.move(to: to)
                 head.line(to: NSPoint(x: to.x - 5, y: mid + 3))
                 head.line(to: NSPoint(x: to.x - 5, y: mid - 3))
                 head.close()
                 head.fill()
+            case .sketchy:
+                // Wobbly shaft + open chevron head with a slight hand-drawn bow.
+                let nose = NSPoint(x: to.x - 1, y: mid)
+                let shaft = NSBezierPath()
+                shaft.lineWidth = 1.6
+                shaft.lineCapStyle = .round
+                shaft.lineJoinStyle = .round
+                shaft.move(to: NSPoint(x: from.x, y: mid - 0.5))
+                shaft.curve(
+                    to: NSPoint(x: to.x - 6.5, y: mid + 0.3),
+                    controlPoint1: NSPoint(x: from.x + 5, y: mid - 1.6),
+                    controlPoint2: NSPoint(x: to.x - 11, y: mid + 1.6))
+                shaft.stroke()
+                // Upper chevron leg with a tiny outward bow.
+                let upper = NSBezierPath()
+                upper.lineWidth = 1.6
+                upper.lineCapStyle = .round
+                upper.move(to: nose)
+                upper.curve(
+                    to: NSPoint(x: to.x - 6.5, y: mid + 3.5),
+                    controlPoint1: NSPoint(x: to.x - 3.5, y: mid + 1.4),
+                    controlPoint2: NSPoint(x: to.x - 4.6, y: mid + 2.2))
+                upper.stroke()
+                // Lower chevron leg with a slightly different bow.
+                let lower = NSBezierPath()
+                lower.lineWidth = 1.6
+                lower.lineCapStyle = .round
+                lower.move(to: nose)
+                lower.curve(
+                    to: NSPoint(x: to.x - 6.5, y: mid - 3.5),
+                    controlPoint1: NSPoint(x: to.x - 3.5, y: mid - 1.6),
+                    controlPoint2: NSPoint(x: to.x - 4.4, y: mid - 2.4))
+                lower.stroke()
             }
             return true
         }
@@ -899,6 +940,36 @@ class ToolOptionsRowView: NSView {
         outlineSwatch.target = self
         outlineSwatch.action = #selector(textOutlineColorClicked(_:))
         addSubview(outlineSwatch)
+        curX += fillSwatchSize + 6
+
+        // Stroke (per-glyph): clickable label (toggles on/off) + color swatch
+        let strokeLabelBtn = NSButton(title: L("Stroke"), target: self, action: #selector(textGlyphStrokeToggled(_:)))
+        strokeLabelBtn.bezelStyle = .recessed
+        strokeLabelBtn.setButtonType(.toggle)
+        strokeLabelBtn.state = ov.textEditor.glyphStrokeEnabled ? .on : .off
+        strokeLabelBtn.font = NSFont.systemFont(ofSize: 10, weight: .medium)
+        strokeLabelBtn.attributedTitle = NSAttributedString(string: L("Stroke"), attributes: [
+            .font: NSFont.systemFont(ofSize: 10, weight: .medium),
+            .baselineOffset: 0.5,
+        ])
+        strokeLabelBtn.sizeToFit()
+        strokeLabelBtn.frame = NSRect(x: curX, y: (rowHeight - 22) / 2, width: max(46, strokeLabelBtn.frame.width), height: 22)
+        addSubview(strokeLabelBtn)
+        curX += strokeLabelBtn.frame.width + 2
+
+        let strokeSwatch = NSButton(frame: NSRect(x: curX, y: (rowHeight - fillSwatchSize) / 2, width: fillSwatchSize, height: fillSwatchSize))
+        strokeSwatch.title = ""
+        strokeSwatch.isBordered = false
+        strokeSwatch.wantsLayer = true
+        strokeSwatch.layer?.backgroundColor = ov.textEditor.glyphStrokeColor.cgColor
+        strokeSwatch.layer?.cornerRadius = 3
+        strokeSwatch.layer?.borderWidth = 1.5
+        strokeSwatch.layer?.borderColor = ToolbarLayout.iconColor.withAlphaComponent(0.4).cgColor
+        strokeSwatch.layer?.opacity = ov.textEditor.glyphStrokeEnabled ? 1.0 : 0.3
+        strokeSwatch.tag = 977
+        strokeSwatch.target = self
+        strokeSwatch.action = #selector(textGlyphStrokeColorClicked(_:))
+        addSubview(strokeSwatch)
         curX += fillSwatchSize
 
         // Cancel / Confirm — only when actively editing text, right-aligned
@@ -1227,9 +1298,10 @@ class ToolOptionsRowView: NSView {
             ensureSnapshot()
             ann.strokeWidth = val
             ov.cachedCompositedImage = nil
-        } else {
-            if let tool = currentTool { ov.setActiveStrokeWidth(val, for: tool) }
         }
+        // Always update the global default so the last-picked stroke sticks
+        // for the next capture, whether or not an annotation was being edited.
+        if let tool = currentTool { ov.setActiveStrokeWidth(val, for: tool) }
         if let label = viewWithTag(997) as? NSTextField {
             label.stringValue = currentTool == .loupe ? "\(Int(val))" : "\(Int(val))px"
         }
@@ -1243,10 +1315,9 @@ class ToolOptionsRowView: NSView {
                 ensureSnapshot()
                 ann.lineStyle = style
                 ov.cachedCompositedImage = nil
-            } else {
-                ov.currentLineStyle = style
-                UserDefaults.standard.set(style.rawValue, forKey: "currentLineStyle")
             }
+            ov.currentLineStyle = style
+            UserDefaults.standard.set(style.rawValue, forKey: "currentLineStyle")
             ov.needsDisplay = true
         }
     }
@@ -1258,10 +1329,9 @@ class ToolOptionsRowView: NSView {
                 ensureSnapshot()
                 ann.arrowStyle = style
                 ov.cachedCompositedImage = nil
-            } else {
-                ov.currentArrowStyle = style
-                UserDefaults.standard.set(style.rawValue, forKey: "currentArrowStyle")
             }
+            ov.currentArrowStyle = style
+            UserDefaults.standard.set(style.rawValue, forKey: "currentArrowStyle")
             ov.needsDisplay = true
         }
     }
@@ -1273,10 +1343,9 @@ class ToolOptionsRowView: NSView {
                 ensureSnapshot()
                 ann.rectFillStyle = style
                 ov.cachedCompositedImage = nil
-            } else {
-                ov.currentRectFillStyle = style
-                UserDefaults.standard.set(style.rawValue, forKey: "currentRectFillStyle")
             }
+            ov.currentRectFillStyle = style
+            UserDefaults.standard.set(style.rawValue, forKey: "currentRectFillStyle")
             ov.needsDisplay = true
         }
     }
@@ -1288,10 +1357,9 @@ class ToolOptionsRowView: NSView {
             ensureSnapshot()
             ann.rectCornerRadius = val
             ov.cachedCompositedImage = nil
-        } else {
-            ov.currentRectCornerRadius = val
-            UserDefaults.standard.set(sender.doubleValue, forKey: "currentRectCornerRadius")
         }
+        ov.currentRectCornerRadius = val
+        UserDefaults.standard.set(sender.doubleValue, forKey: "currentRectCornerRadius")
         if let label = viewWithTag(996) as? NSTextField {
             label.stringValue = "\(Int(val))px"
         }
@@ -1301,6 +1369,15 @@ class ToolOptionsRowView: NSView {
     @objc private func censorModeChanged(_ sender: NSSegmentedControl) {
         guard let mode = CensorMode(rawValue: sender.selectedSegment) else { return }
         UserDefaults.standard.set(mode.rawValue, forKey: "censorMode")
+        if let ann = editingAnnotation, ann.tool == .pixelate || ann.tool == .blur {
+            ensureSnapshot()
+            ann.censorMode = mode
+            // Clear the baked image so bakePixelate re-runs with the new mode.
+            ann.bakedBlurNSImage = nil
+            ann.bakePixelate()
+            overlayView?.cachedCompositedImage = nil
+            overlayView?.needsDisplay = true
+        }
     }
 
     @objc private func numberFormatChanged(_ sender: NSSegmentedControl) {
@@ -1489,6 +1566,22 @@ class ToolOptionsRowView: NSView {
         if PopoverHelper.isVisible { PopoverHelper.dismiss(); return }
         guard let ov = overlayView else { return }
         ov.showColorPickerPopover(target: .textOutline, anchorView: sender)
+    }
+
+    @objc private func textGlyphStrokeToggled(_ sender: NSButton) {
+        guard let ov = overlayView else { return }
+        ov.textEditor.glyphStrokeEnabled = sender.state == .on
+        UserDefaults.standard.set(ov.textEditor.glyphStrokeEnabled, forKey: "textGlyphStrokeEnabled")
+        if let swatch = viewWithTag(977) { swatch.layer?.opacity = ov.textEditor.glyphStrokeEnabled ? 1.0 : 0.3 }
+        ov.applyGlyphStrokeToLiveTextView()
+        ov.applyTextBgOutlineToSelectedAnnotations()
+        ov.needsDisplay = true
+    }
+
+    @objc private func textGlyphStrokeColorClicked(_ sender: NSButton) {
+        if PopoverHelper.isVisible { PopoverHelper.dismiss(); return }
+        guard let ov = overlayView else { return }
+        ov.showColorPickerPopover(target: .textGlyphStroke, anchorView: sender)
     }
 
     // MARK: - Annotation outline

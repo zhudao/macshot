@@ -6,7 +6,7 @@ import CoreImage
 /// Uses performClose so windowShouldClose is called (triggers unsaved changes warning).
 private class EditorWindow: NSWindow {
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "q" {
+        if event.modifierFlags.contains(.command) && event.keyCode == 12 {  // Q
             performClose(nil)
             return true
         }
@@ -41,7 +41,15 @@ class DetachedEditorWindowController: NSObject, NSWindowDelegate {
     /// Open an editor window with the given image (typically from captureSelectedRegion).
     /// When `disableBeautify` is true, beautify starts off regardless of UserDefaults
     /// (used when the image already has beautify baked in).
-    static func open(image: NSImage, tool: AnnotationTool = .arrow, color: NSColor = .systemRed, strokeWidth: CGFloat = 3, annotations: [Annotation] = [], historyEntryID: String? = nil, fromCapture: Bool = false, disableBeautify: Bool = false) {
+    ///
+    /// `tool`, `color`, and `strokeWidth` are nil by default — when nil, the new
+    /// EditorView keeps whatever its property initializers loaded from
+    /// UserDefaults (the user's last-used choices). Pass explicit values only
+    /// when a caller needs to force a specific state. Don't restore defaults
+    /// here: writing `view.currentTool = .arrow` triggers the didSet that
+    /// persists "arrow" globally, wiping the user's last-tool memory across
+    /// the whole app.
+    static func open(image: NSImage, tool: AnnotationTool? = nil, color: NSColor? = nil, strokeWidth: CGFloat? = nil, annotations: [Annotation] = [], historyEntryID: String? = nil, fromCapture: Bool = false, disableBeautify: Bool = false) {
         let controller = DetachedEditorWindowController()
         controller.historyEntryID = historyEntryID
         controller.disableBeautifyOnOpen = disableBeautify
@@ -54,7 +62,7 @@ class DetachedEditorWindowController: NSObject, NSWindowDelegate {
         }
     }
 
-    private func show(image: NSImage, tool: AnnotationTool, color: NSColor, strokeWidth: CGFloat, annotations: [Annotation]) {
+    private func show(image: NSImage, tool: AnnotationTool?, color: NSColor?, strokeWidth: CGFloat?, annotations: [Annotation]) {
         let imgSize = image.size
         let screen = NSScreen.main ?? NSScreen.screens.first!
         let screenFrame = screen.visibleFrame
@@ -77,7 +85,11 @@ class DetachedEditorWindowController: NSObject, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        win.title = "macshot Editor"
+        // Timestamp suffix so multiple editor windows are distinguishable
+        // in the Dock menu, Window menu, and Mission Control.
+        let dateFmt = DateFormatter()
+        dateFmt.dateFormat = "HH:mm:ss"
+        win.title = "macshot Editor — \(dateFmt.string(from: Date()))"
         win.minSize = NSSize(width: minW, height: minH)
         win.maxSize = NSSize(width: screenFrame.width, height: screenFrame.height)
         win.isReleasedWhenClosed = false
@@ -90,9 +102,12 @@ class DetachedEditorWindowController: NSObject, NSWindowDelegate {
         view.autoresizingMask = []  // fixed size — scroll view handles viewport
         view.screenshotImage = image
         view.overlayDelegate = self
-        view.currentTool = tool
-        view.currentColor = color
-        view.currentStrokeWidth = strokeWidth
+        // Only override the EditorView's own initializers when the caller
+        // explicitly passed values — otherwise the user's persisted choices
+        // (loaded from UserDefaults during EditorView init) survive intact.
+        if let tool = tool { view.currentTool = tool }
+        if let color = color { view.currentColor = color }
+        if let strokeWidth = strokeWidth { view.currentStrokeWidth = strokeWidth }
         if disableBeautifyOnOpen {
             view.beautifyEnabled = false
         }
@@ -172,8 +187,31 @@ class DetachedEditorWindowController: NSObject, NSWindowDelegate {
         win.makeFirstResponder(view)
         NSApp.activate(ignoringOtherApps: true)
 
-        // Scroll to top so tall images start at the top, not the bottom
-        if let docView = scrollView.documentView {
+        // Fit-to-window for large images: compute the magnification that makes
+        // the image just fit the visible scroll viewport, capped at 1.0 so we
+        // never zoom small images up. Without this, opening (e.g.) a 4284x5712
+        // photo on a typical screen shows only the top-left corner at 1x (#161).
+        // The scrollView's contentView bounds are valid after layout, which
+        // happens during makeKeyAndOrderFront. clipView.bounds reflects the
+        // inset-aware visible area.
+        scrollView.layoutSubtreeIfNeeded()
+        let visible = scrollView.contentView.bounds.size
+        if imgSize.width > 0, imgSize.height > 0, visible.width > 0, visible.height > 0 {
+            let fitMag = min(visible.width / imgSize.width, visible.height / imgSize.height)
+            // Only scale down — leave small images at 1x.
+            let initialMag = min(1.0, fitMag)
+            // Clamp into the scroll view's allowed range.
+            let clamped = max(scrollView.minMagnification, min(scrollView.maxMagnification, initialMag))
+            if clamped < 0.999 {
+                scrollView.magnification = clamped
+                topBar.updateZoom(clamped)
+            }
+        }
+
+        // Scroll to top so tall images start at the top, not the bottom.
+        // Skipped when we fit-to-window because the centering clip view
+        // already presents the whole image in view.
+        if let docView = scrollView.documentView, scrollView.magnification >= 0.999 {
             docView.scroll(NSPoint(x: 0, y: docView.frame.maxY))
         }
 
@@ -328,12 +366,11 @@ extension DetachedEditorWindowController: OverlayViewDelegate {
         guard let imageData = ImageEncoder.encode(image) else { return }
         let savePanel = NSSavePanel()
         savePanel.allowedContentTypes = [ImageEncoder.utType]
-        savePanel.nameFieldStringValue = "macshot_\(OverlayWindowController.formattedTimestamp()).\(ImageEncoder.fileExtension)"
+        savePanel.nameFieldStringValue = FilenameFormatter.defaultImageFilename()
         savePanel.directoryURL = SaveDirectoryAccess.directoryHint()
         savePanel.beginSheetModal(for: window!) { [weak self] response in
             if response == .OK, let url = savePanel.url {
                 try? imageData.write(to: url)
-                SaveDirectoryAccess.save(url: url.deletingLastPathComponent())
                 self?.playCopySound()
                 self?.autoSaveToHistoryIfNeeded(compositedImage: image)
             }
@@ -351,30 +388,29 @@ extension DetachedEditorWindowController: OverlayViewDelegate {
     func overlayViewDidRequestOCR() {
         guard let image = overlayView?.captureSelectedRegion(),
               let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
-        let request = VisionOCR.makeTextRecognitionRequest { [weak self] req, _ in
-            let lines = (req.results as? [VNRecognizedTextObservation])?.compactMap { $0.topCandidates(1).first?.string } ?? []
-            let text = lines.joined(separator: "\n")
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                // OCR action: 0 = window + copy, 1 = window only, 2 = copy only
-                let ocrAction = UserDefaults.standard.integer(forKey: "ocrAction")
-                let shouldCopy = ocrAction == 0 || ocrAction == 2
-                let shouldShowWindow = ocrAction == 0 || ocrAction == 1
+        DispatchQueue.global(qos: .userInitiated).async {
+            VisionOCR.performTextRecognition(cgImage: cgImage) { [weak self] req, _ in
+                let lines = (req.results as? [VNRecognizedTextObservation])?.compactMap { $0.topCandidates(1).first?.string } ?? []
+                let text = lines.joined(separator: "\n")
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    // OCR action: 0 = window + copy, 1 = window only, 2 = copy only
+                    let ocrAction = UserDefaults.standard.integer(forKey: "ocrAction")
+                    let shouldCopy = ocrAction == 0 || ocrAction == 2
+                    let shouldShowWindow = ocrAction == 0 || ocrAction == 1
 
-                if shouldCopy && !text.isEmpty {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(text, forType: .string)
-                }
-                if shouldShowWindow {
-                    self.ocrController?.close()
-                    let ocr = OCRResultController(text: text, image: image)
-                    self.ocrController = ocr
-                    ocr.show()
+                    if shouldCopy && !text.isEmpty {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(text, forType: .string)
+                    }
+                    if shouldShowWindow {
+                        self.ocrController?.close()
+                        let ocr = OCRResultController(text: text, image: image)
+                        self.ocrController = ocr
+                        ocr.show()
+                    }
                 }
             }
-        }
-        DispatchQueue.global(qos: .userInitiated).async {
-            try? VNImageRequestHandler(cgImage: cgImage, options: [:]).perform([request])
         }
     }
 
@@ -448,8 +484,7 @@ extension DetachedEditorWindowController: OverlayViewDelegate {
         guard let raw = overlayView?.captureSelectedRegion() else { return }
         let image = applyPostProcessing(raw)
         guard let imageData = ImageEncoder.encode(image) else { return }
-        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("macshot_\(OverlayWindowController.formattedTimestamp()).\(ImageEncoder.fileExtension)")
+        let tempURL = TmpScratchDirectory.makeURL(filename: FilenameFormatter.defaultImageFilename())
         try? imageData.write(to: tempURL)
 
         let picker = NSSharingServicePicker(items: [tempURL])
@@ -644,7 +679,7 @@ private class AddCaptureOverlayHandler: NSObject, OverlayWindowControllerDelegat
         let scale = controller.screen.backingScaleFactor
         let pixelW = Int(globalRect.width * scale)
         let pixelH = Int(globalRect.height * scale)
-        let cs = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        let cs = CGColorSpace(name: CGColorSpace.sRGB)!
         guard let cgCtx = CGContext(data: nil, width: pixelW, height: pixelH,
                                      bitsPerComponent: 8, bytesPerRow: pixelW * 4,
                                      space: cs, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }

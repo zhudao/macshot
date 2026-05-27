@@ -20,6 +20,7 @@
 "Capture OCR" = "Wykonaj OCR";
 "Quick Capture" = "Szybkie przechwycenie";
 "Scroll Capture" = "Przechwyć i przewiń";
+"Capture Last Area" = "Przechwyć ostatni obszar";
 "Capture Delay" = "Przechwycenie z opóźnieniem";
 "None" = "Brak";
 "%d seconds" = "%d s";
@@ -183,12 +184,12 @@
 "Capture" = "Zrzut";
 "Play sound on capture" = "Odtwórz dźwięk przy przechwyceniu";
 "Play sound on copy" = "Odtwórz dźwięk przy kopiowaniu";
-"Remember last selection area" = "Zapamiętaj ostatni obszar zaznaczenia";
 "Remember last selected tool" = "Zapamiętaj ostatnio wybrane narzędzie";
 "Show floating thumbnail after capture" = "Pokaż pływającą miniaturę po zrzucie";
 "Launch at login" = "Uruchamiaj przy logowaniu";
 "Show snap alignment guides" = "Pokaż linie wyrównywania";
 "Capture mouse cursor in screenshot" = "Uwzględnij kursor myszy na zrzucie";
+"Double-click selection to copy" = "Kliknij dwukrotnie zaznaczenie, aby skopiować";
 "Use window title in saved filename" = "Użyj tytułu okna w nazwie pliku";
 "Hide menu bar icon" = "Ukryj ikonę na pasku menu";
 "Hotkeys still work. To show the icon again, re-launch macshot." = "Skróty nadal działają. Aby przywrócić ikonę, uruchom ponownie macshot.";
@@ -200,6 +201,7 @@
 "  Multiple previews:" = "  Wiele podglądów:";
 "Stack (keep all)" = "Stosuj (zachowaj wszystkie)";
 "Replace (show only latest)" = "Zastąp (pokaż tylko ostatni)";
+"  Position:" = "  Położenie:";
 "Output" = "Wyjście";
 "Image format:" = "Format obrazu:";
 "Quality:" = "Jakość:";
@@ -376,6 +378,7 @@
 
 /* Save Panel */
 "Save As..." = "Zachowaj jako...";
+"Save Recording" = "Zachowaj nagranie";
 "Choose a folder" = "Wybierz folder";
 "Save All to Folder…" = "Zachowaj wszystkie do folderu…";
 
@@ -405,7 +408,7 @@
 "Click \"Record\" and press a key combination with at least one modifier (⌘, ⌥, ⌃, ⇧) to set a shortcut." = "Kliknij \"Nagrywaj\" i naciśnij kombinację klawiszy z co najmniej jednym modyfikatorem (⌘, ⌥, ⌃, ⇧), aby ustawić skrót.";
 
 /* Recording — GIF Processing */
-"Processing GIF\U2026" = "Przetwarzanie GIF\U2026";
+"Processing GIF…" = "Przetwarzanie GIF…";
 
 /* Recording — Input Monitoring Permission */
 "Input Monitoring Required" = "Wymagane monitorowanie danych wejściowych";
@@ -434,6 +437,10 @@
 "Top Left" = "Lewy górny";
 "Small" = "Mały";
 "Large" = "Duży";
+"Webcam Size Small" = "Mały";
+"Webcam Size Medium" = "Średni";
+"Webcam Size Large" = "Duży";
+"Webcam Size Extra Large" = "Bardzo duży";
 "Circle" = "Koło";
 "Rounded Rectangle" = "Zaokrąglony prostokąt";
 "Cam pos:" = "Poz. kamery:";
@@ -457,6 +464,10 @@
 "Set" = "Ustaw";
 "Press..." = "Naciśnij...";
 "Reset to default" = "Przywróć domyślne";
+"Menu Bar Order" = "Kolejność w menu paska";
+"Choose the order of capture actions in the macshot menu bar menu." = "Wybierz kolejność akcji przechwytywania w menu macshot na pasku menu.";
+"Move up" = "Przenieś wyżej";
+"Move down" = "Przenieś niżej";
 "Press a single key to assign it as the shortcut for that tool. These work when the overlay or editor is active." = "Naciśnij pojedynczy klawisz, aby przypisać go jako skrót do tego narzędzia. Działają, gdy nakładka lub edytor jest aktywny.";
 "Keep Separate" = "Zachowaj osobno";
 "Merge Audio" = "Połącz audio";
@@ -481,7 +492,7 @@
 "Download language packs in System Settings…" = "Pobierz pakiety językowe w Ustawieniach systemowych…";
 "Configure S3 in Settings" = "Skonfiguruj S3 w Ustawieniach";
 "Sign in to Google Drive in Settings" = "Zaloguj się do Google Drive w Ustawieniach";
-"Position:" = "Pozycja:";
+"Position:" = "Położenie:";
 "Size:" = "Rozmiar:";
 "Shape:" = "Kształt:";
 
@@ -495,3 +506,84 @@
 "Files are uploaded to a \"macshot\" folder in your Google Drive. Everything stays private — nothing is shared publicly." = "Pliki są przesyłane do folderu \"macshot\" na Dysku Google. Pliki pozostają prywatne — nic nie jest udostępniane publicznie.";
 
 "Pressure" = "Nacisk";
+
+/* Added for v4.1.0-beta.3 — video editor, effects, open-video, shortcuts help */
+"Open Video..." = "Otwórz wideo...";
+"Choose a video to open in macshot editor" = "Wybierz wideo do otwarcia w edytorze macshot";
+"Click to add effects" = "Kliknij, aby dodać efekty";
+"Add Zoom" = "Dodaj powiększenie";
+"Add Censor" = "Dodaj cenzurę";
+"Add Cut" = "Dodaj cięcie";
+"Add Speed" = "Dodaj prędkość";
+"Add Freeze" = "Dodaj stop-klatkę";
+"Add Text" = "Dodaj tekst";
+"Delete Zoom" = "Usuń powiększenie";
+"Delete Censor" = "Usuń cenzurę";
+"Delete Cut" = "Usuń cięcie";
+"Delete Speed" = "Usuń prędkość";
+"Delete Freeze" = "Usuń stop-klatkę";
+"Delete Text" = "Usuń tekst";
+"Edit Text…" = "Edytuj tekst…";
+"Huge" = "Ogromny";
+"Bold" = "Pogrubienie";
+"Italic" = "Kursywa";
+"Alignment" = "Wyrównanie";
+"Left" = "Do lewej";
+"Center" = "Do środka";
+"Right" = "Do prawej";
+"Text Color" = "Kolor tekstu";
+"Background Color" = "Kolor tła";
+"Rounded" = "Zaokrąglony";
+"Custom…" = "Własny…";
+"Transparent" = "Przezroczysty";
+"Black" = "Czarny";
+"White" = "Biały";
+"Yellow" = "Żółty";
+"Red" = "Czerwony";
+"Green" = "Zielony";
+"Blue" = "Niebieski";
+"Untitled" = "Bez tytułu";
+"Add effect" = "Dodaj efekt";
+"Fade" = "Przenikanie";
+"High" = "Wysoka";
+"Low" = "Niska";
+"Not enough room here" = "Za mało miejsca";
+"Copied!" = "Skopiowano!";
+"Converting to GIF…" = "Konwertowanie do GIF…";
+"GIF conversion failed" = "Konwersja do GIF nie powiodła się";
+"No video track found" = "Nie znaleziono ścieżki wideo";
+"Preview:" = "Podgląd:";
+"Copy Screen Info" = "Kopiuj informacje o ekranie";
+"Copies display and capture diagnostics to clipboard" = "Kopiuje diagnostykę wyświetlacza i przechwytywania do schowka";
+"Accent" = "Akcent";
+"Icon" = "Ikona";
+"Background" = "Tło";
+"Custom" = "Własny";
+"Theme:" = "Motyw:";
+"Application" = "Aplikacja";
+"Capture area and extract text" = "Przechwyć obszar i wyodrębnij tekst";
+"Capture the full screen" = "Przechwyć pełny ekran";
+"Counter for multi-screen captures" = "Licznik dla zrzutów z wielu ekranów";
+"8-character random string (e.g. k3j7x9q2)" = "Losowy ciąg 8 znaków (np. k3j7x9q2)";
+"Filename Template Tokens" = "Tokeny szablonu nazwy pliku";
+"Filename tokens" = "Tokeny nazwy pliku";
+"Filename:" = "Nazwa pliku:";
+"Open an image file in the editor" = "Otwórz plik obrazu w edytorze";
+"Open the recent captures overlay" = "Otwórz nakładkę ostatnich zrzutów";
+"Open this settings window" = "Otwórz to okno ustawień";
+"Quick capture (uses your Enter action)" = "Szybki zrzut (używa Twojej akcji Enter)";
+"Re-capture the last selected area" = "Przechwyć ponownie ostatnio zaznaczony obszar";
+"Screenshots only — captured window title (blank otherwise)" = "Tylko zrzuty ekranu — tytuł przechwyconego okna (w przeciwnym razie puste)";
+"Show available filename tokens" = "Pokaż dostępne tokeny nazwy pliku";
+"Show supported URL scheme commands" = "Pokaż obsługiwane polecenia schematu URL";
+"Enable macshot:// URL scheme" = "Włącz schemat URL macshot://";
+"Start area capture" = "Rozpocznij przechwytywanie obszaru";
+"Start area recording" = "Rozpocznij nagrywanie obszaru";
+"Start full-screen recording" = "Rozpocznij nagrywanie pełnego ekranu";
+"Start scroll capture" = "Rozpocznij przechwytywanie z przewijaniem";
+"Stop the current recording" = "Zatrzymaj bieżące nagrywanie";
+"Supported URL Scheme Commands" = "Obsługiwane polecenia schematu URL";
+"The file extension is appended automatically. Slashes and colons in {window} become dashes." = "Rozszerzenie pliku jest dodawane automatycznie. Ukośniki i dwukropki w {window} stają się myślnikami.";
+"Trigger macshot from Raycast, Alfred, Shortcuts, or any tool that opens URLs." = "Uruchamiaj macshot z Raycast, Alfred, Shortcuts lub dowolnego narzędzia, które otwiera adresy URL.";
+"URL scheme info" = "Informacje o schemacie URL";
+"sec (0 = never)" = "s (0 = nigdy)";

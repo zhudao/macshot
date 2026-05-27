@@ -20,6 +20,7 @@
 "Capture OCR" = "Capturar OCR";
 "Quick Capture" = "Captura Rapida";
 "Scroll Capture" = "Captura com Deslocamento";
+"Capture Last Area" = "Capturar última área";
 "Capture Delay" = "Atraso de Captura";
 "None" = "Nenhum";
 "%d seconds" = "%d segundos";
@@ -183,12 +184,12 @@
 "Capture" = "Captura";
 "Play sound on capture" = "Reproduzir som ao capturar";
 "Play sound on copy" = "Reproduzir som ao copiar";
-"Remember last selection area" = "Recordar ultima area de selecao";
 "Remember last selected tool" = "Recordar ultima ferramenta selecionada";
 "Show floating thumbnail after capture" = "Mostrar miniatura flutuante apos captura";
 "Launch at login" = "Iniciar ao arrancar";
 "Show snap alignment guides" = "Mostrar guias de alinhamento";
 "Capture mouse cursor in screenshot" = "Capturar cursor do rato na captura de ecra";
+"Double-click selection to copy" = "Duplo clique na selecao para copiar";
 "Use window title in saved filename" = "Usar titulo da janela no nome do ficheiro";
 "Hide menu bar icon" = "Ocultar icone da barra de menus";
 "Hotkeys still work. To show the icon again, re-launch macshot." = "Os atalhos continuam a funcionar. Para mostrar o icone novamente, reinicie o macshot.";
@@ -200,6 +201,11 @@
 "  Multiple previews:" = "  Varias pre-visualizacoes:";
 "Stack (keep all)" = "Empilhar (manter todas)";
 "Replace (show only latest)" = "Substituir (mostrar apenas a mais recente)";
+"  Position:" = "  Posicao:";
+"Menu Bar Order" = "Ordem da barra de menus";
+"Choose the order of capture actions in the macshot menu bar menu." = "Escolha a ordem das acoes de captura no menu da barra de menus do macshot.";
+"Move up" = "Mover para cima";
+"Move down" = "Mover para baixo";
 "Output" = "Saida";
 "Image format:" = "Formato de imagem:";
 "Quality:" = "Qualidade:";
@@ -376,6 +382,7 @@
 
 /* Save Panel */
 "Save As..." = "Guardar Como...";
+"Save Recording" = "Guardar Gravação";
 "Choose a folder" = "Escolher uma pasta";
 "Save All to Folder…" = "Guardar Tudo na Pasta...";
 
@@ -405,7 +412,7 @@
 "Click \"Record\" and press a key combination with at least one modifier (⌘, ⌥, ⌃, ⇧) to set a shortcut." = "Clique em \"Gravar\" e prima uma combinacao de teclas com pelo menos um modificador (⌘, ⌥, ⌃, ⇧) para definir um atalho.";
 
 /* Recording — GIF Processing */
-"Processing GIF\U2026" = "A processar GIF\U2026";
+"Processing GIF…" = "A processar GIF…";
 
 /* Recording — Input Monitoring Permission */
 "Input Monitoring Required" = "Monitorizacao de Entrada Necessaria";
@@ -434,6 +441,10 @@
 "Top Left" = "Superior Esquerdo";
 "Small" = "Pequeno";
 "Large" = "Grande";
+"Webcam Size Small" = "Pequeno";
+"Webcam Size Medium" = "Medio";
+"Webcam Size Large" = "Grande";
+"Webcam Size Extra Large" = "Muito grande";
 "Circle" = "Circulo";
 "Rounded Rectangle" = "Retangulo Arredondado";
 "Cam pos:" = "Pos. cam.:";
@@ -495,3 +506,84 @@
 "Files are uploaded to a \"macshot\" folder in your Google Drive. Everything stays private — nothing is shared publicly." = "Os ficheiros são carregados para uma pasta \"macshot\" no seu Google Drive. Tudo permanece privado — nada é partilhado publicamente.";
 
 "Pressure" = "Pressão";
+
+/* Added for v4.1.0-beta.3 — video editor, effects, open-video, shortcuts help */
+"Open Video..." = "Abrir Vídeo...";
+"Choose a video to open in macshot editor" = "Escolher um vídeo para abrir no editor do macshot";
+"Click to add effects" = "Clique para adicionar efeitos";
+"Add Zoom" = "Adicionar Zoom";
+"Add Censor" = "Adicionar Censura";
+"Add Cut" = "Adicionar Corte";
+"Add Speed" = "Adicionar Velocidade";
+"Add Freeze" = "Adicionar Congelamento";
+"Add Text" = "Adicionar Texto";
+"Delete Zoom" = "Eliminar Zoom";
+"Delete Censor" = "Eliminar Censura";
+"Delete Cut" = "Eliminar Corte";
+"Delete Speed" = "Eliminar Velocidade";
+"Delete Freeze" = "Eliminar Congelamento";
+"Delete Text" = "Eliminar Texto";
+"Edit Text…" = "Editar Texto…";
+"Huge" = "Enorme";
+"Bold" = "Negrito";
+"Italic" = "Itálico";
+"Alignment" = "Alinhamento";
+"Left" = "Esquerda";
+"Center" = "Centro";
+"Right" = "Direita";
+"Text Color" = "Cor do Texto";
+"Background Color" = "Cor de Fundo";
+"Rounded" = "Arredondado";
+"Custom…" = "Personalizado…";
+"Transparent" = "Transparente";
+"Black" = "Preto";
+"White" = "Branco";
+"Yellow" = "Amarelo";
+"Red" = "Vermelho";
+"Green" = "Verde";
+"Blue" = "Azul";
+"Untitled" = "Sem título";
+"Add effect" = "Adicionar efeito";
+"Fade" = "Desvanecer";
+"High" = "Alto";
+"Low" = "Baixo";
+"Not enough room here" = "Espaço insuficiente aqui";
+"Copied!" = "Copiado!";
+"Converting to GIF…" = "A converter para GIF…";
+"GIF conversion failed" = "Falha na conversão para GIF";
+"No video track found" = "Nenhuma faixa de vídeo encontrada";
+"Preview:" = "Pré-visualização:";
+"Copy Screen Info" = "Copiar Informação do Ecrã";
+"Copies display and capture diagnostics to clipboard" = "Copia diagnósticos do ecrã e captura para a área de transferência";
+"Accent" = "Destaque";
+"Icon" = "Ícone";
+"Background" = "Fundo";
+"Custom" = "Personalizado";
+"Theme:" = "Tema:";
+"Application" = "Aplicação";
+"Capture area and extract text" = "Capturar área e extrair texto";
+"Capture the full screen" = "Capturar o ecrã inteiro";
+"Counter for multi-screen captures" = "Contador para capturas de múltiplos ecrãs";
+"8-character random string (e.g. k3j7x9q2)" = "Cadeia aleatória de 8 caracteres (ex.: k3j7x9q2)";
+"Filename Template Tokens" = "Tokens do Modelo de Nome de Ficheiro";
+"Filename tokens" = "Tokens de nome de ficheiro";
+"Filename:" = "Nome do ficheiro:";
+"Open an image file in the editor" = "Abrir um ficheiro de imagem no editor";
+"Open the recent captures overlay" = "Abrir a sobreposição de capturas recentes";
+"Open this settings window" = "Abrir esta janela de definições";
+"Quick capture (uses your Enter action)" = "Captura rápida (usa a sua ação Enter)";
+"Re-capture the last selected area" = "Recapturar a última área selecionada";
+"Screenshots only — captured window title (blank otherwise)" = "Apenas capturas de ecrã — título da janela capturada (vazio caso contrário)";
+"Show available filename tokens" = "Mostrar tokens de nome de ficheiro disponíveis";
+"Show supported URL scheme commands" = "Mostrar comandos do esquema de URL suportados";
+"Enable macshot:// URL scheme" = "Ativar esquema de URL macshot://";
+"Start area capture" = "Iniciar captura de área";
+"Start area recording" = "Iniciar gravação de área";
+"Start full-screen recording" = "Iniciar gravação de ecrã inteiro";
+"Start scroll capture" = "Iniciar captura com deslocamento";
+"Stop the current recording" = "Parar a gravação atual";
+"Supported URL Scheme Commands" = "Comandos do Esquema de URL Suportados";
+"The file extension is appended automatically. Slashes and colons in {window} become dashes." = "A extensão do ficheiro é adicionada automaticamente. Barras e dois pontos em {window} tornam-se traços.";
+"Trigger macshot from Raycast, Alfred, Shortcuts, or any tool that opens URLs." = "Acione o macshot a partir de Raycast, Alfred, Shortcuts ou qualquer ferramenta que abra URLs.";
+"URL scheme info" = "Informação do esquema de URL";
+"sec (0 = never)" = "seg (0 = nunca)";

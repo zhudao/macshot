@@ -9,6 +9,50 @@ struct CaptureAnnotationData {
     let annotations: [Annotation]
 }
 
+private final class ScreenshotOverlayRootView: NSView {
+    private let previewLayer = CALayer()
+    let overlayView: OverlayView
+
+    init(frame: NSRect, overlayView: OverlayView) {
+        self.overlayView = overlayView
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+        layer?.masksToBounds = true
+        previewLayer.contentsGravity = .resize
+        previewLayer.masksToBounds = true
+        layer?.addSublayer(previewLayer)
+        overlayView.frame = bounds
+        overlayView.autoresizingMask = [.width, .height]
+        addSubview(overlayView)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func layout() {
+        super.layout()
+        previewLayer.frame = bounds
+    }
+
+    func setScreenshotPreviewImage(_ cgImage: CGImage) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        previewLayer.frame = bounds
+        previewLayer.contentsScale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        previewLayer.contents = cgImage
+        CATransaction.commit()
+        overlayView.usesExternalScreenshotPreview = true
+    }
+
+    func clearScreenshotPreview() {
+        previewLayer.contents = nil
+        overlayView.usesExternalScreenshotPreview = false
+    }
+}
+
 @MainActor
 protocol OverlayWindowControllerDelegate: AnyObject {
     func overlayDidCancel(_ controller: OverlayWindowController)
@@ -40,8 +84,14 @@ class OverlayWindowController {
 
     weak var overlayDelegate: OverlayWindowControllerDelegate?
     var capturedWindowTitle: String?
+    var timingMark: ((String) -> Void)? {
+        didSet {
+            overlayView?.timingMark = timingMark
+        }
+    }
 
     private var overlayView: OverlayView?
+    private var rootView: ScreenshotOverlayRootView?
     private var overlayWindow: OverlayWindow?
     private var shareDelegate: SharePickerDelegate?
     private var shareDismissTime: Date = .distantPast
@@ -58,49 +108,102 @@ class OverlayWindowController {
     var sessionRecordingOnStop: String? { overlayView?.sessionRecordingOnStop }
     var sessionRecordingDelay: Int? { overlayView?.sessionRecordingDelay }
     var sessionHideRecordingHUD: Bool? { overlayView?.sessionHideRecordingHUD }
-
+    /// Create an overlay pre-populated with a screenshot. Visible immediately on showOverlay().
     init(capture: ScreenCapture) {
         let screen = capture.screen
         self.screen = screen
+        setupWindow(screen: screen)
+        installScreenshot(capture.image)
+    }
 
+    /// Create an empty overlay. Stays transparent (showing the live desktop) until
+    /// setScreenshot() is called with the captured image.
+    init(screen: NSScreen) {
+        self.screen = screen
+        setupWindow(screen: screen)
+    }
+
+    private func setupWindow(screen: NSScreen) {
+        // .nonactivatingPanel lets the overlay become key without activating the
+        // macshot app — no NSApp.activate, no focus dance with the previous app.
         let window = OverlayWindow(
             contentRect: screen.frame,
-            styleMask: [.borderless],
+            styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
-        window.level = NSWindow.Level(257)  // above modal panels, alerts, and security popups
+        window.level = NSWindow.Level(257)
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = false
         window.ignoresMouseEvents = false
         window.acceptsMouseMovedEvents = true
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.hidesOnDeactivate = false
         window.isReleasedWhenClosed = false
 
         let view = OverlayView()
-        let nsImage = NSImage(cgImage: capture.image, size: screen.frame.size)
-        view.screenshotImage = nsImage
         view.frame = NSRect(origin: .zero, size: screen.frame.size)
         view.autoresizingMask = [.width, .height]
         view.overlayDelegate = self
+        view.timingMark = timingMark
 
-        window.contentView = view
+        let rootView = ScreenshotOverlayRootView(
+            frame: NSRect(origin: .zero, size: screen.frame.size),
+            overlayView: view)
+        view.externalScreenshotPreviewUpdater = { [weak rootView] cgImage in
+            if let cgImage {
+                rootView?.setScreenshotPreviewImage(cgImage)
+            } else {
+                rootView?.clearScreenshotPreview()
+            }
+        }
+
+        window.contentView = rootView
         self.overlayWindow = window
+        self.rootView = rootView
         self.overlayView = view
     }
 
+    /// Install the screenshot into the overlay's backing layer. Once set, the
+    /// window becomes opaque (dark dim) and the overlay can render annotations.
+    private func installScreenshot(_ image: CGImage) {
+        let nsImage = NSImage(cgImage: image, size: screen.frame.size)
+        overlayView?.captureSourceImage = nsImage
+        overlayView?.screenshotImage = nsImage
+        rootView?.setScreenshotPreviewImage(image)
+        overlayWindow?.isOpaque = true
+        overlayWindow?.backgroundColor = .black
+    }
+
+    /// Show the overlay. Becomes key + first responder immediately. If a
+    /// screenshot was pre-installed, it's visible on the first frame; otherwise
+    /// the overlay is transparent (live desktop visible through it) and waits
+    /// for setScreenshot() to install one.
     func showOverlay() {
         guard let window = overlayWindow else { return }
-        // Force the view to render into its backing store before showing the window.
-        // This ensures the screenshot is fully drawn when the window appears,
-        // preventing a flash of the deactivating app underneath.
-        if let view = overlayView {
-            view.displayIfNeeded()
-        }
+        timingMark?("showOverlay begin appActive=\(NSApp.isActive)")
+        rootView?.layoutSubtreeIfNeeded()
+        timingMark?("after layoutSubtreeIfNeeded")
+        overlayView?.displayIfNeeded()
+        timingMark?("after displayIfNeeded")
         window.makeKeyAndOrderFront(nil)
+        timingMark?("after makeKeyAndOrderFront isVisible=\(window.isVisible) isKey=\(window.isKeyWindow)")
         if let view = overlayView {
             window.makeFirstResponder(view)
+        }
+        timingMark?("after makeFirstResponder")
+        // Window is now key — resetCursorRects (called by AppKit on key change)
+        // installs the crosshair rect. No need to NSCursor.set() imperatively.
+    }
+
+    /// Install the captured screenshot after showOverlay() has already made the
+    /// window key. The overlay was previously transparent; this is the moment
+    /// it becomes screenshot-backed with the dim mask.
+    func setScreenshot(_ image: CGImage) {
+        installScreenshot(image)
+        if let view = overlayView {
+            overlayWindow?.invalidateCursorRects(for: view)
         }
     }
 
@@ -108,6 +211,28 @@ class OverlayWindowController {
         overlayWindow?.makeKeyAndOrderFront(nil)
         if let view = overlayView {
             overlayWindow?.makeFirstResponder(view)
+        }
+    }
+
+    /// One-shot warmup: briefly order the (currently empty) panel front so
+    /// WindowServer allocates its surface and composes one frame. We
+    /// immediately order it out — but the CGSWindow stays alive and so does
+    /// WindowServer's per-window composition cache. Next real `showOverlay()`
+    /// hits the warm path. Pair with the overlay controller pool that keeps
+    /// the panel alive across capture sessions.
+    func warmPanel() {
+        guard let panel = overlayWindow else { return }
+        // Use a barely-visible alpha so WindowServer doesn't optimize the
+        // window away as a transparent no-op. Restore after we order out.
+        let savedAlpha = panel.alphaValue
+        panel.alphaValue = 0.001
+        panel.orderFrontRegardless()
+        rootView?.layoutSubtreeIfNeeded()
+        overlayView?.displayIfNeeded()
+        CATransaction.flush()
+        DispatchQueue.main.async {
+            panel.orderOut(nil)
+            panel.alphaValue = savedAlpha
         }
     }
 
@@ -179,9 +304,28 @@ class OverlayWindowController {
                                maxHeight: Int = 0) {
         overlayView?.scrollCaptureMaxHeight = maxHeight
         if isActive {
+            // Make the overlay window fully transparent + pass-through so the
+            // user sees AND interacts with the live app underneath. We must:
+            //   1) Clear the rootView's previewLayer (which holds the frozen
+            //      screenshot independent of OverlayView's drawing).
+            //   2) Mark the window non-opaque + clear background so AppKit
+            //      doesn't paint a solid backing behind the layer.
+            //   3) ignoresMouseEvents = true so scroll/click events fall
+            //      through to the app beneath (the HUD has its own panel).
+            rootView?.clearScreenshotPreview()
+            overlayWindow?.isOpaque = false
+            overlayWindow?.backgroundColor = .clear
             overlayView?.startScrollCaptureMode()
         } else {
             overlayView?.stopScrollCaptureMode()
+            // Restore the screenshot-backed opaque overlay so the next
+            // action (selection adjustment, confirm, etc.) sees the screenshot.
+            if let img = overlayView?.captureSourceImage,
+               let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+                rootView?.setScreenshotPreviewImage(cg)
+                overlayWindow?.isOpaque = true
+                overlayWindow?.backgroundColor = .black
+            }
         }
         overlayView?.scrollCaptureStripCount = stripCount
         overlayView?.scrollCapturePixelSize = pixelSize
@@ -197,22 +341,44 @@ class OverlayWindowController {
         overlayView?.needsDisplay = true
     }
 
+    /// End the current capture session. The window/view/panel are KEPT ALIVE
+    /// and returned to a clean idle state, so the next session can reuse this
+    /// same controller (and crucially, the same NSPanel CGSWindow — which is
+    /// what makes the next capture instant, since WindowServer's per-window
+    /// composition cache survives `orderOut`).
     func dismiss() {
         saveSelectionIfNeeded()
         overlayView?.reset()
         overlayView?.screenshotImage = nil
+        overlayView?.captureSourceImage = nil
+        rootView?.clearScreenshotPreview()
+        // Restore the window's transparent state so the next session starts
+        // with the same defaults as a fresh install.
+        overlayWindow?.isOpaque = false
+        overlayWindow?.backgroundColor = .clear
+        overlayWindow?.orderOut(nil)
+        NSCursor.arrow.set()
+        // Note: overlayDelegate is intentionally NOT cleared here; the
+        // controller-pool owner re-assigns it before each session.
+        // overlayWindow/rootView/overlayView remain alive for the next session.
+    }
+
+    /// Fully tear down the controller. Used when the screen config changes
+    /// (display added/removed), or app shutdown. After this the controller is
+    /// dead and a new one must be constructed.
+    func tearDown() {
+        overlayView?.reset()
         overlayView?.overlayDelegate = nil
         overlayWindow?.contentView = nil
+        rootView = nil
         overlayView = nil
         overlayWindow?.orderOut(nil)
         overlayWindow?.close()
         overlayWindow = nil
-        NSCursor.arrow.set()
     }
 
     private func saveSelectionIfNeeded() {
-        guard UserDefaults.standard.bool(forKey: "rememberLastSelection"),
-            let view = overlayView, view.state == .selected,
+        guard let view = overlayView, view.state == .selected,
             view.selectionRect.width > 1, view.selectionRect.height > 1
         else { return }
         UserDefaults.standard.set(NSStringFromRect(view.selectionRect), forKey: "lastSelectionRect")
@@ -284,17 +450,13 @@ class OverlayWindowController {
         ImageEncoder.copyToClipboard(image)
     }
 
-    static func formattedTimestamp() -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
-        return formatter.string(from: Date())
-    }
 }
 
 // MARK: - OverlayViewDelegate
 
 extension OverlayWindowController: OverlayViewDelegate {
     func overlayViewDidFinishSelection(_ rect: NSRect) {
+        // No-op: window is already key (.nonactivatingPanel + makeKeyAndOrderFront).
     }
 
     func overlayViewSelectionDidChange(_ rect: NSRect) {
@@ -388,28 +550,25 @@ extension OverlayWindowController: OverlayViewDelegate {
             return
         }
 
-        let request = VisionOCR.makeTextRecognitionRequest { [weak self] request, error in
-            guard let self = self else { return }
-            var lines: [String] = []
-            if let observations = request.results as? [VNRecognizedTextObservation] {
-                for observation in observations {
-                    if let candidate = observation.topCandidates(1).first {
-                        lines.append(candidate.string)
+        DispatchQueue.global(qos: .userInitiated).async {
+            VisionOCR.performTextRecognition(cgImage: cgImage) { [weak self] request, _ in
+                guard let self = self else { return }
+                var lines: [String] = []
+                if let observations = request.results as? [VNRecognizedTextObservation] {
+                    for observation in observations {
+                        if let candidate = observation.topCandidates(1).first {
+                            lines.append(candidate.string)
+                        }
                     }
                 }
+                let text = lines.joined(separator: "\n")
+                let capturedImage = image  // capture before dismiss
+                DispatchQueue.main.async {
+                    self.playCopySound()
+                    self.dismiss()
+                    self.overlayDelegate?.overlayDidRequestOCR(self, text: text, image: capturedImage)
+                }
             }
-            let text = lines.joined(separator: "\n")
-            let capturedImage = image  // capture before dismiss
-            DispatchQueue.main.async {
-                self.playCopySound()
-                self.dismiss()
-                self.overlayDelegate?.overlayDidRequestOCR(self, text: text, image: capturedImage)
-            }
-        }
-
-        DispatchQueue.global(qos: .userInitiated).async {
-            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-            try? handler.perform([request])
         }
     }
 
@@ -431,9 +590,8 @@ extension OverlayWindowController: OverlayViewDelegate {
         guard var image = captureRegion() else { return }
         image = applyBeautifyIfNeeded(image) ?? image
         guard let imageData = ImageEncoder.encode(image) else { return }
-        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent(
-                "macshot_\(Self.formattedTimestamp()).\(ImageEncoder.fileExtension)")
+        let tempURL = TmpScratchDirectory.makeURL(
+            filename: FilenameFormatter.defaultImageFilename(windowTitle: capturedWindowTitle))
         try? imageData.write(to: tempURL)
 
         // Get the screen position of the share button
@@ -573,7 +731,10 @@ extension OverlayWindowController: OverlayViewDelegate {
                 let scale = view.window?.backingScaleFactor ?? 2.0
                 let pxW = Int(sel.width * scale)
                 let pxH = Int(sel.height * scale)
-                let cs = CGColorSpaceCreateDeviceRGB()
+                // Preserve the source image's color space so the editor and saved
+                // files render correct colors on every display.
+                let srcCG = src.cgImage(forProposedRect: nil, context: nil, hints: nil)
+                let cs = srcCG?.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!
                 let bitmapInfo = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
                 guard let ctx = CGContext(
                     data: nil, width: pxW, height: pxH,
@@ -777,18 +938,9 @@ extension OverlayWindowController: OverlayViewDelegate {
     private func saveImageToDirectory(_ image: NSImage) {
         let dirURL = SaveDirectoryAccess.resolve()
 
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
-        let timestamp = formatter.string(from: Date())
-        let useWindowTitle = UserDefaults.standard.bool(forKey: "useWindowTitleInFilename")
-        let filename: String
-        if useWindowTitle, let title = capturedWindowTitle {
-            let safe = title.replacingOccurrences(of: "/", with: "-")
-                .replacingOccurrences(of: ":", with: "-")
-            filename = "Screenshot \(timestamp) — \(safe).\(ImageEncoder.fileExtension)"
-        } else {
-            filename = "Screenshot \(timestamp).\(ImageEncoder.fileExtension)"
-        }
+        let template = UserDefaults.standard.string(forKey: FilenameFormatter.userDefaultsKey) ?? FilenameFormatter.defaultTemplate
+        let base = FilenameFormatter.format(template: template, windowTitle: capturedWindowTitle)
+        let filename = "\(base).\(ImageEncoder.fileExtension)"
         let fileURL = dirURL.appendingPathComponent(filename)
 
         DispatchQueue.global(qos: .userInitiated).async {
@@ -805,8 +957,7 @@ extension OverlayWindowController: OverlayViewDelegate {
 
         let savePanel = NSSavePanel()
         savePanel.allowedContentTypes = [ImageEncoder.utType]
-        savePanel.nameFieldStringValue =
-            "macshot_\(Self.formattedTimestamp()).\(ImageEncoder.fileExtension)"
+        savePanel.nameFieldStringValue = FilenameFormatter.defaultImageFilename(windowTitle: capturedWindowTitle)
         savePanel.level = NSWindow.Level(258)
 
         savePanel.directoryURL = SaveDirectoryAccess.directoryHint()
@@ -815,7 +966,6 @@ extension OverlayWindowController: OverlayViewDelegate {
             guard let self = self else { return }
             if response == .OK, let url = savePanel.url {
                 try? imageData.write(to: url)
-                SaveDirectoryAccess.save(url: url.deletingLastPathComponent())
                 self.playCopySound()
                 self.dismiss()
                 self.overlayDelegate?.overlayDidConfirm(self, capturedImage: nil, annotationData: nil)
@@ -831,7 +981,7 @@ extension OverlayWindowController: OverlayViewDelegate {
 
 // MARK: - Custom Window subclass
 
-class OverlayWindow: NSWindow {
+class OverlayWindow: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 }

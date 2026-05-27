@@ -1,11 +1,12 @@
 import Cocoa
 import Carbon
 import ServiceManagement
+import ScreenCaptureKit
 
 /// Settings window that intercepts Cmd+Q to close itself instead of quitting the app.
 private class SettingsWindow: NSWindow {
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "q" {
+        if event.modifierFlags.contains(.command) && event.keyCode == 12 {  // Q
             close()
             return true
         }
@@ -13,7 +14,29 @@ private class SettingsWindow: NSWindow {
     }
 }
 
-class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowDelegate {
+class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowDelegate {
+
+    // MARK: - Toolbar tab definitions
+    private struct TabDef {
+        let id: String
+        let label: String
+        let symbolName: String
+        let legacyImageName: String  // fallback for older macOS if needed
+    }
+    private static let tabDefs: [TabDef] = [
+        TabDef(id: "general",   label: "General",   symbolName: "gearshape",                 legacyImageName: NSImage.preferencesGeneralName),
+        TabDef(id: "capture",   label: "Capture",   symbolName: "camera.viewfinder",         legacyImageName: NSImage.preferencesGeneralName),
+        TabDef(id: "shortcuts", label: "Shortcuts", symbolName: "keyboard",                  legacyImageName: NSImage.preferencesGeneralName),
+        TabDef(id: "tools",     label: "Tools",     symbolName: "paintbrush",                legacyImageName: NSImage.preferencesGeneralName),
+        TabDef(id: "recording", label: "Recording", symbolName: "record.circle",             legacyImageName: NSImage.preferencesGeneralName),
+        TabDef(id: "uploads",   label: "Uploads",   symbolName: "icloud.and.arrow.up",       legacyImageName: NSImage.preferencesGeneralName),
+        TabDef(id: "about",     label: "About",     symbolName: "info.circle",               legacyImageName: NSImage.preferencesGeneralName),
+    ]
+
+    private var tabContentContainer: NSView!
+    private var tabContentViews: [String: NSView] = [:]
+    private var currentTabID: String = "general"
+
 
     private var hotkeyFields: [HotkeyManager.HotkeySlot: NSTextField] = [:]
     private var hotkeyButtons: [HotkeyManager.HotkeySlot: NSButton] = [:]
@@ -24,12 +47,13 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
     private var savePathField: NSTextField!
     private var ocrActionPopup: NSPopUpButton!
     private var copySoundCheckbox: NSButton!
-    private var rememberSelectionCheckbox: NSButton!
+    // rememberSelectionCheckbox removed — selection is always saved for "Capture Last Area"
     private var rememberToolCheckbox: NSButton!
     private var thumbnailCheckbox: NSButton!
     private var thumbnailAutoDismissStepper: NSStepper!
     private var thumbnailAutoDismissField: NSTextField!
     private var thumbnailStackingPopup: NSPopUpButton!
+    private var thumbnailCornerPopup: NSPopUpButton!
     private var historyUnlimitedCheckbox: NSButton!
     private var thumbnailScaleLabel: NSTextField!
     private var launchAtLoginCheckbox: NSButton!
@@ -38,12 +62,17 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
     private var historySizeStepper: NSStepper!
     private var snapGuidesCheckbox: NSButton!
     private var captureCursorCheckbox: NSButton!
-    private var windowTitleCheckbox: NSButton!
+    private var doubleClickToCopyCheckbox: NSButton!
+    private var filenameTemplateField: NSTextField!
+    private var filenameTemplatePreview: NSTextField!
+    private var recordingFilenameTemplateField: NSTextField!
+    private var recordingFilenameTemplatePreview: NSTextField!
     private var autoUpdateCheckbox: NSButton!
     private var betaUpdateCheckbox: NSButton!
     private var accentColorWell: NSColorWell!
     private var iconColorWell: NSColorWell!
     private var bgColorWell: NSColorWell!
+    private var themePresetPopup: NSPopUpButton!
     private var quickModePopup: NSPopUpButton!
     private var quickCaptureOpenEditorCheckbox: NSButton!
     private var imageFormatPopup: NSPopUpButton!
@@ -51,7 +80,9 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
     private var qualityLabel: NSTextField!
     private var qualityRowLabel: NSTextField!
     private var downscaleRetinaCheckbox: NSButton!
-    private var embedColorProfileCheckbox: NSButton!
+    private var captureMenuOrder: [CaptureMenuItemID] = []
+    private var captureMenuOrderRowsStack: NSStackView?
+    // embedColorProfileCheckbox removed — native color profile is always embedded
     private var imgbbKeyField: NSTextField!
     private var localMonitor: Any?
     private weak var uploadsStack: NSStackView?
@@ -88,7 +119,7 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
 
     init() {
         let window = SettingsWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 660),
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 520),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -96,6 +127,9 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
         window.title = L("macshot Settings")
         window.center()
         window.isReleasedWhenClosed = false
+        // Window is non-resizable (no .resizable in styleMask), so content size
+        // is locked. We also set the content size explicitly after the toolbar
+        // is installed (in setupUI) to override NSToolbar's auto-sizing.
         super.init(window: window)
         window.delegate = self
         setupUI()
@@ -107,48 +141,43 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
     // MARK: - Top-level layout
 
     private func setupUI() {
-        guard let cv = window?.contentView else { return }
+        guard let window = window, let cv = window.contentView else { return }
 
-        // Logo
-        let logo = NSImageView()
-        logo.image = NSImage(named: "Logo")
-        logo.imageScaling = .scaleProportionallyUpOrDown
-        logo.translatesAutoresizingMaskIntoConstraints = false
+        // Toolbar (preference style — icon + label, Shottr-like)
+        let toolbar = NSToolbar(identifier: "SettingsToolbar")
+        toolbar.delegate = self
+        toolbar.displayMode = .iconAndLabel
+        toolbar.allowsUserCustomization = false
+        toolbar.autosavesConfiguration = false
+        if #available(macOS 11.0, *) {
+            window.toolbarStyle = .preference
+        }
+        window.toolbar = toolbar
+        toolbar.selectedItemIdentifier = NSToolbarItem.Identifier("general")
+        // Re-apply content size after toolbar install, since NSToolbar can
+        // resize the window to fit its items.
+        //
+        // Width went from 560 → 620 to accommodate longer translated
+        // strings (issue #130 — Polish "Szybkie przechwycenie:" + the
+        // "Automatycznie zamazuj dane wrażliwe" checkbox both overflowed
+        // the old layout). The extra 60pt flows evenly across the two
+        // toggle-grid columns so Polish/German/Dutch labels fit on one
+        // line instead of wrapping.
+        window.setContentSize(NSSize(width: 620, height: 520))
 
-        // Tab view
-        let tabView = NSTabView()
-        tabView.translatesAutoresizingMaskIntoConstraints = false
-        tabView.delegate = self
+        // Build all tab content views up front (preserves existing behavior — nothing lazy-created)
+        tabContentViews["general"]   = makeGeneralTabView()
+        tabContentViews["capture"]   = makeCaptureTabView()
+        tabContentViews["shortcuts"] = makeShortcutsTabView()
+        tabContentViews["tools"]     = makeToolsTabView()
+        tabContentViews["recording"] = makeRecordingTabView()
+        tabContentViews["uploads"]   = makeUploadsTabView()
+        tabContentViews["about"]     = makeAboutTabView()
 
-        let generalTab = NSTabViewItem(identifier: "general")
-        generalTab.label = L("General")
-        generalTab.view = makeGeneralTabView()
-        tabView.addTabViewItem(generalTab)
-
-        let shortcutsTab = NSTabViewItem(identifier: "shortcuts")
-        shortcutsTab.label = L("Shortcuts")
-        shortcutsTab.view = makeShortcutsTabView()
-        tabView.addTabViewItem(shortcutsTab)
-
-        let toolsTab = NSTabViewItem(identifier: "tools")
-        toolsTab.label = L("Tools")
-        toolsTab.view = makeToolsTabView()
-        tabView.addTabViewItem(toolsTab)
-
-        let recordingTab = NSTabViewItem(identifier: "recording")
-        recordingTab.label = L("Recording")
-        recordingTab.view = makeRecordingTabView()
-        tabView.addTabViewItem(recordingTab)
-
-        let uploadsTab = NSTabViewItem(identifier: "uploads")
-        uploadsTab.label = L("Uploads")
-        uploadsTab.view = makeUploadsTabView()
-        tabView.addTabViewItem(uploadsTab)
-
-        let aboutTab = NSTabViewItem(identifier: "about")
-        aboutTab.label = L("About")
-        aboutTab.view = makeAboutTabView()
-        tabView.addTabViewItem(aboutTab)
+        // Container that swaps content views
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        tabContentContainer = container
 
         // Footer separator
         let sep = NSBox()
@@ -177,23 +206,16 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
         footerStack.spacing = 0
         footerStack.translatesAutoresizingMaskIntoConstraints = false
 
-        cv.addSubview(logo)
-        cv.addSubview(tabView)
+        cv.addSubview(container)
         cv.addSubview(sep)
         cv.addSubview(footerStack)
 
         NSLayoutConstraint.activate([
-            // Logo centered at top
-            logo.topAnchor.constraint(equalTo: cv.topAnchor, constant: 16),
-            logo.centerXAnchor.constraint(equalTo: cv.centerXAnchor),
-            logo.widthAnchor.constraint(equalToConstant: 56),
-            logo.heightAnchor.constraint(equalToConstant: 56),
-
-            // Tab view below logo, above footer
-            tabView.topAnchor.constraint(equalTo: logo.bottomAnchor, constant: 8),
-            tabView.leadingAnchor.constraint(equalTo: cv.leadingAnchor),
-            tabView.trailingAnchor.constraint(equalTo: cv.trailingAnchor),
-            tabView.bottomAnchor.constraint(equalTo: sep.topAnchor, constant: -0),
+            // Content container fills above the footer
+            container.topAnchor.constraint(equalTo: cv.topAnchor),
+            container.leadingAnchor.constraint(equalTo: cv.leadingAnchor),
+            container.trailingAnchor.constraint(equalTo: cv.trailingAnchor),
+            container.bottomAnchor.constraint(equalTo: sep.topAnchor),
 
             // Footer separator
             sep.leadingAnchor.constraint(equalTo: cv.leadingAnchor),
@@ -207,11 +229,111 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
             footerStack.bottomAnchor.constraint(equalTo: cv.bottomAnchor, constant: -8),
             footerStack.heightAnchor.constraint(equalToConstant: 20),
         ])
+
+        // Show initial tab
+        showTab(id: "general")
+    }
+
+    private func showTab(id: String) {
+        guard let container = tabContentContainer, let view = tabContentViews[id] else { return }
+        // Remove existing content
+        for sub in container.subviews { sub.removeFromSuperview() }
+        view.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(view)
+        NSLayoutConstraint.activate([
+            view.topAnchor.constraint(equalTo: container.topAnchor),
+            view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            view.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+        currentTabID = id
+        window?.title = "\(L("macshot Settings")) — \(L(Self.tabDefs.first(where: { $0.id == id })?.label ?? ""))"
+        if id == "uploads" {
+            reloadUploadsTab()
+        }
+    }
+
+    @objc private func toolbarTabSelected(_ sender: NSToolbarItem) {
+        showTab(id: sender.itemIdentifier.rawValue)
+    }
+
+    // MARK: - NSToolbarDelegate
+
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        return Self.tabDefs.map { NSToolbarItem.Identifier($0.id) }
+    }
+
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        return toolbarDefaultItemIdentifiers(toolbar)
+    }
+
+    func toolbarSelectableItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        return toolbarDefaultItemIdentifiers(toolbar)
+    }
+
+    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        guard let def = Self.tabDefs.first(where: { $0.id == itemIdentifier.rawValue }) else { return nil }
+        let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+        item.label = L(def.label)
+        item.paletteLabel = L(def.label)
+        if #available(macOS 11.0, *) {
+            item.image = NSImage(systemSymbolName: def.symbolName, accessibilityDescription: def.label)
+        } else {
+            item.image = NSImage(named: def.legacyImageName)
+        }
+        item.target = self
+        item.action = #selector(toolbarTabSelected(_:))
+        return item
     }
 
     // MARK: - General Tab
 
-    private func makeGeneralTabView() -> NSView {
+    /// NSStackView subclass with flipped coordinates so content pins to the top
+    /// of its scroll view (default AppKit origin is bottom-left, which would
+    /// push short content to the bottom of a tall clip view).
+    private final class FlippedStackView: NSStackView {
+        override var isFlipped: Bool { true }
+    }
+
+    /// Small SF Symbol icon that reports hover enter/exit via callback. Used for
+    /// hover-to-show info popovers next to settings controls.
+    fileprivate final class HoverPopoverIconView: NSImageView {
+        /// Called with (the view, true) on hover enter and (view, false) on exit.
+        var onHover: ((NSView, Bool) -> Void)?
+        private var trackingArea: NSTrackingArea?
+
+        init(image: NSImage?, tintColor: NSColor, toolTip: String?) {
+            super.init(frame: NSRect(x: 0, y: 0, width: 16, height: 16))
+            self.image = image
+            self.contentTintColor = tintColor
+            self.toolTip = toolTip
+            self.imageScaling = .scaleProportionallyDown
+            self.translatesAutoresizingMaskIntoConstraints = false
+            self.widthAnchor.constraint(equalToConstant: 16).isActive = true
+            self.heightAnchor.constraint(equalToConstant: 16).isActive = true
+        }
+
+        required init?(coder: NSCoder) { fatalError() }
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            if let existing = trackingArea { removeTrackingArea(existing) }
+            let area = NSTrackingArea(
+                rect: bounds,
+                options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+                owner: self,
+                userInfo: nil
+            )
+            addTrackingArea(area)
+            trackingArea = area
+        }
+
+        override func mouseEntered(with event: NSEvent) { onHover?(self, true) }
+        override func mouseExited(with event: NSEvent)  { onHover?(self, false) }
+    }
+
+    /// Creates a scrollable vertical stack matching the layout used by all settings tabs.
+    private func makeSettingsScrollStack() -> (NSScrollView, NSStackView) {
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
@@ -219,12 +341,30 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
         scroll.drawsBackground = false
         scroll.autoresizingMask = [.width, .height]
 
-        let stack = NSStackView()
+        let stack = FlippedStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 0
         stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.edgeInsets = NSEdgeInsets(top: 0, left: 20, bottom: 16, right: 20)
+        stack.edgeInsets = NSEdgeInsets(top: 16, left: 20, bottom: 16, right: 20)
+        return (scroll, stack)
+    }
+
+    /// Finalizes a settings tab by wiring the stack into the scroll view.
+    private func finalizeSettingsStack(scroll: NSScrollView, stack: NSStackView) {
+        let clipView = scroll.contentView
+        scroll.documentView = stack
+
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: clipView.topAnchor),
+            stack.leadingAnchor.constraint(equalTo: clipView.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: clipView.trailingAnchor),
+            // no bottom constraint — stack grows to fit content, scroll handles overflow
+        ])
+    }
+
+    private func makeGeneralTabView() -> NSView {
+        let (scroll, stack) = makeSettingsScrollStack()
 
         // ── Language ──────────────────────────────────────────
         stack.addArrangedSubview(sectionHeader(L("Language")))
@@ -249,6 +389,108 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
         langNote.textColor = .secondaryLabelColor
         stack.addArrangedSubview(indented(langNote))
         stack.setCustomSpacing(20, after: stack.arrangedSubviews.last!)
+
+        // ── Application ──────────────────────────────────────
+        stack.addArrangedSubview(sectionHeader(L("Application")))
+        stack.setCustomSpacing(10, after: stack.arrangedSubviews.last!)
+
+        launchAtLoginCheckbox = NSButton(checkboxWithTitle: L("Launch at login"), target: self, action: #selector(launchAtLoginChanged(_:)))
+        stack.addArrangedSubview(indented(launchAtLoginCheckbox))
+        stack.setCustomSpacing(6, after: stack.arrangedSubviews.last!)
+
+        hideMenuBarIconCheckbox = NSButton(checkboxWithTitle: L("Hide menu bar icon"), target: self, action: #selector(hideMenuBarIconChanged(_:)))
+        stack.addArrangedSubview(indented(hideMenuBarIconCheckbox))
+        stack.setCustomSpacing(4, after: stack.arrangedSubviews.last!)
+
+        let hideNote = NSTextField(wrappingLabelWithString: L("Hotkeys still work. To show the icon again, re-launch macshot."))
+        hideNote.font = NSFont.systemFont(ofSize: 10)
+        hideNote.textColor = .secondaryLabelColor
+        stack.addArrangedSubview(indented(hideNote))
+        stack.setCustomSpacing(6, after: stack.arrangedSubviews.last!)
+
+        let urlSchemeCheckbox = NSButton(checkboxWithTitle: L("Enable macshot:// URL scheme"), target: self, action: #selector(urlSchemeChanged(_:)))
+        urlSchemeCheckbox.state = (UserDefaults.standard.object(forKey: "urlSchemeEnabled") as? Bool ?? true) ? .on : .off
+
+        let urlSchemeInfoIcon = HoverPopoverIconView(
+            image: NSImage(systemSymbolName: "info.circle", accessibilityDescription: L("URL scheme info")),
+            tintColor: .secondaryLabelColor,
+            toolTip: L("Show supported URL scheme commands")
+        )
+        urlSchemeInfoIcon.onHover = { [weak self] sourceView, shown in
+            if shown { self?.showURLSchemeInfoPopover(near: sourceView) }
+            // On exit, do nothing — the popover is .transient, so clicking
+            // anywhere outside it closes it. This lets the user move into the
+            // popover to read/copy without it vanishing.
+        }
+
+        let urlSchemeRow = NSStackView(views: [urlSchemeCheckbox, urlSchemeInfoIcon])
+        urlSchemeRow.orientation = .horizontal
+        urlSchemeRow.spacing = 4
+        urlSchemeRow.alignment = .centerY
+        stack.addArrangedSubview(indented(urlSchemeRow))
+        stack.setCustomSpacing(6, after: stack.arrangedSubviews.last!)
+
+        autoUpdateCheckbox = NSButton(checkboxWithTitle: L("Check for updates automatically"), target: self, action: #selector(autoUpdateChanged(_:)))
+        stack.addArrangedSubview(indented(autoUpdateCheckbox))
+        stack.setCustomSpacing(4, after: stack.arrangedSubviews.last!)
+
+        betaUpdateCheckbox = NSButton(checkboxWithTitle: L("Check for beta updates"), target: self, action: #selector(betaUpdateChanged(_:)))
+        stack.addArrangedSubview(indented(betaUpdateCheckbox))
+        stack.setCustomSpacing(20, after: stack.arrangedSubviews.last!)
+
+        // ── Appearance ───────────────────────────────────────
+        stack.addArrangedSubview(sectionHeader(L("Appearance")))
+        stack.setCustomSpacing(10, after: stack.arrangedSubviews.last!)
+
+        // Theme preset dropdown
+        themePresetPopup = NSPopUpButton()
+        for preset in ThemePreset.all {
+            themePresetPopup.addItem(withTitle: L(preset.name))
+        }
+        themePresetPopup.addItem(withTitle: L("Custom"))
+        themePresetPopup.target = self
+        themePresetPopup.action = #selector(themePresetChanged(_:))
+        stack.addArrangedSubview(indented(labeledRow(L("Theme:"), controls: [themePresetPopup])))
+        stack.setCustomSpacing(12, after: stack.arrangedSubviews.last!)
+
+        // Three color wells in a single row with labels underneath
+        accentColorWell = NSColorWell(frame: NSRect(x: 0, y: 0, width: 44, height: 32))
+        accentColorWell.color = ToolbarLayout.accentColor
+        accentColorWell.target = self
+        accentColorWell.action = #selector(accentColorChanged(_:))
+
+        iconColorWell = NSColorWell(frame: NSRect(x: 0, y: 0, width: 44, height: 32))
+        iconColorWell.color = ToolbarLayout.iconColor
+        iconColorWell.target = self
+        iconColorWell.action = #selector(iconColorChanged(_:))
+
+        bgColorWell = NSColorWell(frame: NSRect(x: 0, y: 0, width: 44, height: 32))
+        bgColorWell.color = ToolbarLayout.bgColor
+        bgColorWell.target = self
+        bgColorWell.action = #selector(bgColorChanged(_:))
+
+        let accentCol = makeColorColumn(well: accentColorWell, caption: L("Accent"))
+        let iconCol   = makeColorColumn(well: iconColorWell,   caption: L("Icon"))
+        let bgCol     = makeColorColumn(well: bgColorWell,     caption: L("Background"))
+
+        let colorsRow = NSStackView(views: [accentCol, iconCol, bgCol])
+        colorsRow.orientation = .horizontal
+        colorsRow.alignment = .top
+        colorsRow.spacing = 20
+        stack.addArrangedSubview(indented(colorsRow))
+        stack.setCustomSpacing(20, after: stack.arrangedSubviews.last!)
+
+        // Sync preset popup to current colors
+        updateThemePresetSelection()
+
+        finalizeSettingsStack(scroll: scroll, stack: stack)
+        return scroll
+    }
+
+    // MARK: - Capture Tab
+
+    private func makeCaptureTabView() -> NSView {
+        let (scroll, stack) = makeSettingsScrollStack()
 
         // ── Capture ──────────────────────────────────────────
         stack.addArrangedSubview(sectionHeader(L("Capture")))
@@ -282,15 +524,26 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
 
         // Checkboxes
         copySoundCheckbox = NSButton(checkboxWithTitle: L("Play sound on capture"), target: self, action: #selector(copySoundChanged(_:)))
-        rememberSelectionCheckbox = NSButton(checkboxWithTitle: L("Remember last selection area"), target: self, action: #selector(rememberSelectionChanged(_:)))
         rememberToolCheckbox = NSButton(checkboxWithTitle: L("Remember last selected tool"), target: self, action: #selector(rememberToolChanged(_:)))
         thumbnailCheckbox = NSButton(checkboxWithTitle: L("Show floating thumbnail after capture"), target: self, action: #selector(thumbnailChanged(_:)))
-        launchAtLoginCheckbox = NSButton(checkboxWithTitle: L("Launch at login"), target: self, action: #selector(launchAtLoginChanged(_:)))
         snapGuidesCheckbox = NSButton(checkboxWithTitle: L("Show snap alignment guides"), target: self, action: #selector(snapGuidesChanged(_:)))
         captureCursorCheckbox = NSButton(checkboxWithTitle: L("Capture mouse cursor in screenshot"), target: self, action: #selector(captureCursorChanged(_:)))
-        windowTitleCheckbox = NSButton(checkboxWithTitle: L("Use window title in saved filename"), target: self, action: #selector(windowTitleChanged(_:)))
+        doubleClickToCopyCheckbox = NSButton(checkboxWithTitle: L("Double-click selection to copy"), target: self, action: #selector(doubleClickToCopyChanged(_:)))
+        filenameTemplateField = NSTextField()
+        filenameTemplateField.placeholderString = FilenameFormatter.defaultTemplate
+        filenameTemplateField.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        filenameTemplateField.stringValue = UserDefaults.standard.string(forKey: FilenameFormatter.userDefaultsKey) ?? FilenameFormatter.defaultTemplate
+        filenameTemplateField.target = self
+        filenameTemplateField.action = #selector(filenameTemplateCommitted(_:))
+        filenameTemplateField.delegate = self
+        filenameTemplateField.widthAnchor.constraint(greaterThanOrEqualToConstant: 260).isActive = true
 
-        for cb in [copySoundCheckbox!, rememberSelectionCheckbox!, rememberToolCheckbox!, thumbnailCheckbox!] {
+        filenameTemplatePreview = NSTextField(labelWithString: "")
+        filenameTemplatePreview.font = NSFont.systemFont(ofSize: 10)
+        filenameTemplatePreview.textColor = .secondaryLabelColor
+        filenameTemplatePreview.lineBreakMode = .byTruncatingMiddle
+
+        for cb in [copySoundCheckbox!, rememberToolCheckbox!, thumbnailCheckbox!] {
             stack.addArrangedSubview(indented(cb))
             stack.setCustomSpacing(6, after: stack.arrangedSubviews.last!)
         }
@@ -309,7 +562,7 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
         thumbnailAutoDismissStepper.target = self
         thumbnailAutoDismissStepper.action = #selector(thumbnailAutoDismissChanged(_:))
 
-        let dismissNote = NSTextField(labelWithString: L("seconds before auto-dismiss (0 = never)"))
+        let dismissNote = NSTextField(labelWithString: L("sec (0 = never)"))
         dismissNote.font = NSFont.systemFont(ofSize: 11)
         dismissNote.textColor = .secondaryLabelColor
 
@@ -323,6 +576,13 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
         thumbnailStackingPopup.action = #selector(thumbnailStackingChanged(_:))
 
         stack.addArrangedSubview(indented(labeledRow(L("  Multiple previews:"), controls: [thumbnailStackingPopup!])))
+        stack.setCustomSpacing(8, after: stack.arrangedSubviews.last!)
+
+        thumbnailCornerPopup = NSPopUpButton()
+        thumbnailCornerPopup.addItems(withTitles: [L("Bottom Right"), L("Bottom Left"), L("Top Right"), L("Top Left")])
+        thumbnailCornerPopup.target = self
+        thumbnailCornerPopup.action = #selector(thumbnailCornerChanged(_:))
+        stack.addArrangedSubview(indented(labeledRow(L("  Position:"), controls: [thumbnailCornerPopup!])))
         stack.setCustomSpacing(8, after: stack.arrangedSubviews.last!)
 
         let sizeSlider = NSSlider(value: UserDefaults.standard.object(forKey: "thumbnailScale") as? Double ?? 1.0,
@@ -341,30 +601,7 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
         stack.addArrangedSubview(indented(captureCursorCheckbox))
         stack.setCustomSpacing(6, after: stack.arrangedSubviews.last!)
 
-        stack.addArrangedSubview(indented(windowTitleCheckbox))
-        stack.setCustomSpacing(6, after: stack.arrangedSubviews.last!)
-
-        stack.addArrangedSubview(indented(launchAtLoginCheckbox))
-        stack.setCustomSpacing(6, after: stack.arrangedSubviews.last!)
-
-        hideMenuBarIconCheckbox = NSButton(checkboxWithTitle: L("Hide menu bar icon"), target: self, action: #selector(hideMenuBarIconChanged(_:)))
-        stack.addArrangedSubview(indented(hideMenuBarIconCheckbox))
-        stack.setCustomSpacing(4, after: stack.arrangedSubviews.last!)
-
-        let hideNote = NSTextField(wrappingLabelWithString: L("Hotkeys still work. To show the icon again, re-launch macshot."))
-        hideNote.font = NSFont.systemFont(ofSize: 10)
-        hideNote.textColor = .secondaryLabelColor
-        stack.addArrangedSubview(indented(hideNote))
-        stack.setCustomSpacing(6, after: stack.arrangedSubviews.last!)
-
-        autoUpdateCheckbox = NSButton(checkboxWithTitle: L("Check for updates automatically"), target: self, action: #selector(autoUpdateChanged(_:)))
-        stack.addArrangedSubview(indented(autoUpdateCheckbox))
-        stack.setCustomSpacing(4, after: stack.arrangedSubviews.last!)
-
-        betaUpdateCheckbox = NSButton(checkboxWithTitle: L("Check for beta updates"), target: self, action: #selector(betaUpdateChanged(_:)))
-        stack.addArrangedSubview(indented(betaUpdateCheckbox))
-        stack.setCustomSpacing(6, after: stack.arrangedSubviews.last!)
-
+        stack.addArrangedSubview(indented(doubleClickToCopyCheckbox))
         stack.setCustomSpacing(20, after: stack.arrangedSubviews.last!)
 
         // ── Output ───────────────────────────────────────────
@@ -382,6 +619,25 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
 
         stack.addArrangedSubview(labeledRow(L("Save folder:"), controls: [savePathField, browseBtn]))
         stack.setCustomSpacing(8, after: stack.arrangedSubviews.last!)
+
+        // Filename template
+        let filenameResetBtn = NSButton(title: L("Reset"), target: self, action: #selector(filenameTemplateReset(_:)))
+        filenameResetBtn.bezelStyle = .rounded
+
+        let filenameInfoIcon = HoverPopoverIconView(
+            image: NSImage(systemSymbolName: "info.circle", accessibilityDescription: L("Filename tokens")),
+            tintColor: .secondaryLabelColor,
+            toolTip: L("Show available filename tokens")
+        )
+        filenameInfoIcon.onHover = { [weak self] sourceView, shown in
+            if shown { self?.showFilenameTemplateInfoPopover(near: sourceView) }
+        }
+
+        stack.addArrangedSubview(labeledRow(L("Filename:"), controls: [filenameTemplateField, filenameInfoIcon, filenameResetBtn]))
+        stack.setCustomSpacing(2, after: stack.arrangedSubviews.last!)
+        stack.addArrangedSubview(indented(filenameTemplatePreview))
+        stack.setCustomSpacing(8, after: stack.arrangedSubviews.last!)
+        updateFilenamePreview()
 
         // Image format
         imageFormatPopup = NSPopUpButton()
@@ -430,16 +686,7 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
         stack.addArrangedSubview(indented(downscaleNote))
         stack.setCustomSpacing(6, after: stack.arrangedSubviews.last!)
 
-        // Embed color profile
-        embedColorProfileCheckbox = NSButton(checkboxWithTitle: L("Embed sRGB color profile"), target: self, action: #selector(embedColorProfileChanged(_:)))
-        stack.addArrangedSubview(indented(embedColorProfileCheckbox))
-        stack.setCustomSpacing(2, after: stack.arrangedSubviews.last!)
-
-        let profileNote = NSTextField(labelWithString: L("Ensures consistent colors across different displays"))
-        profileNote.font = NSFont.systemFont(ofSize: 10)
-        profileNote.textColor = .tertiaryLabelColor
-        stack.addArrangedSubview(indented(profileNote))
-        stack.setCustomSpacing(8, after: stack.arrangedSubviews.last!)
+        // Color profile is always embedded (native display profile) — no toggle needed.
 
         // History size
         historySizeField = NSTextField()
@@ -496,50 +743,144 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
             stack.setCustomSpacing(20, after: stack.arrangedSubviews.last!)
         }
 
-        // ── Appearance ───────────────────────────────────────
-        stack.addArrangedSubview(sectionHeader(L("Appearance")))
+        // ── Menu Bar Order ──────────────────────────────────
+        stack.addArrangedSubview(sectionHeader(L("Menu Bar Order")))
         stack.setCustomSpacing(10, after: stack.arrangedSubviews.last!)
 
-        accentColorWell = NSColorWell(frame: NSRect(x: 0, y: 0, width: 36, height: 24))
-        accentColorWell.color = ToolbarLayout.accentColor
-        accentColorWell.target = self
-        accentColorWell.action = #selector(accentColorChanged(_:))
-
-        iconColorWell = NSColorWell(frame: NSRect(x: 0, y: 0, width: 36, height: 24))
-        iconColorWell.color = ToolbarLayout.iconColor
-        iconColorWell.target = self
-        iconColorWell.action = #selector(iconColorChanged(_:))
-
-        bgColorWell = NSColorWell(frame: NSRect(x: 0, y: 0, width: 36, height: 24))
-        bgColorWell.color = ToolbarLayout.bgColor
-        bgColorWell.target = self
-        bgColorWell.action = #selector(bgColorChanged(_:))
-
-        let resetColorsBtn = NSButton(title: L("Reset"), target: self, action: #selector(resetToolbarColors(_:)))
-        resetColorsBtn.bezelStyle = .rounded
-        resetColorsBtn.controlSize = .small
-
-        stack.addArrangedSubview(indented(labeledRow(L("Accent color:"), controls: [accentColorWell])))
+        let menuOrderNote = NSTextField(wrappingLabelWithString: L("Choose the order of capture actions in the macshot menu bar menu."))
+        menuOrderNote.font = NSFont.systemFont(ofSize: 10)
+        menuOrderNote.textColor = .secondaryLabelColor
+        stack.addArrangedSubview(indented(menuOrderNote))
         stack.setCustomSpacing(6, after: stack.arrangedSubviews.last!)
-        stack.addArrangedSubview(indented(labeledRow(L("Icon color:"), controls: [iconColorWell])))
-        stack.setCustomSpacing(6, after: stack.arrangedSubviews.last!)
-        stack.addArrangedSubview(indented(labeledRow(L("Background color:"), controls: [bgColorWell])))
-        stack.setCustomSpacing(6, after: stack.arrangedSubviews.last!)
-        stack.addArrangedSubview(indented(labeledRow("", controls: [resetColorsBtn])))
+
+        captureMenuOrder = CaptureMenuItemID.orderedItems()
+        stack.addArrangedSubview(indented(makeCaptureMenuOrderView()))
+        stack.setCustomSpacing(8, after: stack.arrangedSubviews.last!)
+
+        let resetMenuOrderButton = NSButton(title: L("Reset to default"), target: self, action: #selector(resetCaptureMenuOrder(_:)))
+        resetMenuOrderButton.bezelStyle = .rounded
+        stack.addArrangedSubview(indented(resetMenuOrderButton))
         stack.setCustomSpacing(20, after: stack.arrangedSubviews.last!)
 
-        // Make stack fill scroll width
-        let clipView = scroll.contentView
-        scroll.documentView = stack
+        finalizeSettingsStack(scroll: scroll, stack: stack)
+        return scroll
+    }
+
+    private func makeCaptureMenuOrderView() -> NSView {
+        let box = NSView()
+        box.translatesAutoresizingMaskIntoConstraints = false
+        box.wantsLayer = true
+        box.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.5).cgColor
+        box.layer?.cornerRadius = 6
+        box.layer?.borderWidth = 1
+        box.layer?.borderColor = NSColor.separatorColor.cgColor
+        box.widthAnchor.constraint(greaterThanOrEqualToConstant: 300).isActive = true
+
+        let rows = NSStackView()
+        rows.orientation = .vertical
+        rows.alignment = .leading
+        rows.spacing = 0
+        rows.translatesAutoresizingMaskIntoConstraints = false
+        box.addSubview(rows)
+        captureMenuOrderRowsStack = rows
 
         NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: clipView.topAnchor),
-            stack.leadingAnchor.constraint(equalTo: clipView.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: clipView.trailingAnchor),
-            // no bottom constraint — stack grows to fit content, scroll handles overflow
+            rows.topAnchor.constraint(equalTo: box.topAnchor, constant: 6),
+            rows.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 8),
+            rows.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -8),
+            rows.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -6),
         ])
 
-        return scroll
+        rebuildCaptureMenuOrderRows()
+        return box
+    }
+
+    private func rebuildCaptureMenuOrderRows() {
+        guard let rows = captureMenuOrderRowsStack else { return }
+        rows.arrangedSubviews.forEach {
+            rows.removeArrangedSubview($0)
+            $0.removeFromSuperview()
+        }
+
+        for (index, itemID) in captureMenuOrder.enumerated() {
+            let icon = NSImageView(image: NSImage(systemSymbolName: itemID.symbolName, accessibilityDescription: nil) ?? NSImage())
+            icon.contentTintColor = .secondaryLabelColor
+            icon.translatesAutoresizingMaskIntoConstraints = false
+            icon.widthAnchor.constraint(equalToConstant: 18).isActive = true
+            icon.heightAnchor.constraint(equalToConstant: 18).isActive = true
+
+            let label = NSTextField(labelWithString: itemID.title)
+            label.font = NSFont.systemFont(ofSize: 13)
+            label.lineBreakMode = .byTruncatingTail
+            label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+            let spacer = NSView()
+
+            let upButton = captureMenuOrderButton(
+                symbolName: "chevron.up",
+                action: #selector(moveCaptureMenuItemUp(_:)),
+                tag: index,
+                toolTip: L("Move up"))
+            upButton.isEnabled = index > 0
+
+            let downButton = captureMenuOrderButton(
+                symbolName: "chevron.down",
+                action: #selector(moveCaptureMenuItemDown(_:)),
+                tag: index,
+                toolTip: L("Move down"))
+            downButton.isEnabled = index < captureMenuOrder.count - 1
+
+            let row = NSStackView(views: [icon, label, spacer, upButton, downButton])
+            row.orientation = .horizontal
+            row.alignment = .centerY
+            row.spacing = 8
+            row.translatesAutoresizingMaskIntoConstraints = false
+            row.heightAnchor.constraint(equalToConstant: 30).isActive = true
+
+            rows.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: rows.widthAnchor).isActive = true
+        }
+    }
+
+    private func captureMenuOrderButton(symbolName: String, action: Selector, tag: Int, toolTip: String) -> NSButton {
+        let button = NSButton(title: "", target: self, action: action)
+        button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: toolTip)
+        button.bezelStyle = .texturedRounded
+        button.imagePosition = .imageOnly
+        button.toolTip = toolTip
+        button.tag = tag
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.widthAnchor.constraint(equalToConstant: 26).isActive = true
+        button.heightAnchor.constraint(equalToConstant: 24).isActive = true
+        return button
+    }
+
+    private func saveCaptureMenuOrderAndRefreshMenu() {
+        CaptureMenuItemID.saveOrder(captureMenuOrder)
+        onHotkeyChanged?()
+    }
+
+    @objc private func moveCaptureMenuItemUp(_ sender: NSButton) {
+        let index = sender.tag
+        guard index > 0, index < captureMenuOrder.count else { return }
+        captureMenuOrder.swapAt(index, index - 1)
+        rebuildCaptureMenuOrderRows()
+        saveCaptureMenuOrderAndRefreshMenu()
+    }
+
+    @objc private func moveCaptureMenuItemDown(_ sender: NSButton) {
+        let index = sender.tag
+        guard index >= 0, index < captureMenuOrder.count - 1 else { return }
+        captureMenuOrder.swapAt(index, index + 1)
+        rebuildCaptureMenuOrderRows()
+        saveCaptureMenuOrderAndRefreshMenu()
+    }
+
+    @objc private func resetCaptureMenuOrder(_ sender: NSButton) {
+        CaptureMenuItemID.resetOrder()
+        captureMenuOrder = CaptureMenuItemID.defaultOrder
+        rebuildCaptureMenuOrderRows()
+        onHotkeyChanged?()
     }
 
     // MARK: - Shortcuts Tab
@@ -568,7 +909,7 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
             field.isSelectable = false
             field.alignment = .center
             field.setContentHuggingPriority(.defaultHigh, for: .horizontal)
-            field.widthAnchor.constraint(greaterThanOrEqualToConstant: 80).isActive = true
+            field.widthAnchor.constraint(equalToConstant: 80).isActive = true
             field.stringValue = HotkeyManager.displayString(for: slot)
 
             let btn = NSButton(title: L("Set"), target: self, action: #selector(recordShortcut(_:)))
@@ -620,7 +961,7 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
             field.isSelectable = false
             field.alignment = .center
             field.setContentHuggingPriority(.defaultHigh, for: .horizontal)
-            field.widthAnchor.constraint(greaterThanOrEqualToConstant: 50).isActive = true
+            field.widthAnchor.constraint(equalToConstant: 80).isActive = true
             field.stringValue = ToolShortcutManager.displayString(for: action)
 
             let btn = NSButton(title: L("Set"), target: self, action: #selector(recordToolShortcut(_:)))
@@ -842,6 +1183,7 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
         let toolsGrid = makeToggleGrid(items: annotationTools.map { (tag: $0.rawValue, label: $1) },
                                        defaultsKey: "enabledTools", enabledValues: enabledTools)
         stack.addArrangedSubview(toolsGrid)
+        toolsGrid.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40).isActive = true
         stack.setCustomSpacing(20, after: stack.arrangedSubviews.last!)
 
         // ── Bottom Toolbar Actions ───────────────────────────
@@ -864,6 +1206,7 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
         let bottomActionsGrid = makeToggleGrid(items: bottomActionItems,
                                                defaultsKey: "enabledActions", enabledValues: enabledActions)
         stack.addArrangedSubview(bottomActionsGrid)
+        bottomActionsGrid.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40).isActive = true
         stack.setCustomSpacing(20, after: stack.arrangedSubviews.last!)
 
         // ── Right Toolbar Actions ────────────────────────────
@@ -887,6 +1230,7 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
         let rightActionsGrid = makeToggleGrid(items: rightActionItems,
                                               defaultsKey: "enabledActions", enabledValues: enabledActions)
         stack.addArrangedSubview(rightActionsGrid)
+        rightActionsGrid.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40).isActive = true
 
         let clipView = scroll.contentView
         scroll.documentView = stack
@@ -939,7 +1283,40 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
         recClearBtn.bezelStyle = .rounded
 
         stack.addArrangedSubview(labeledRow(L("Save folder:"), controls: [recSavePathField, recBrowseBtn, recClearBtn]))
+        stack.setCustomSpacing(8, after: stack.arrangedSubviews.last!)
+
+        // Recording filename template
+        recordingFilenameTemplateField = NSTextField()
+        recordingFilenameTemplateField.placeholderString = FilenameFormatter.defaultRecordingTemplate
+        recordingFilenameTemplateField.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        recordingFilenameTemplateField.stringValue = UserDefaults.standard.string(forKey: FilenameFormatter.recordingUserDefaultsKey) ?? FilenameFormatter.defaultRecordingTemplate
+        recordingFilenameTemplateField.target = self
+        recordingFilenameTemplateField.action = #selector(recordingFilenameTemplateCommitted(_:))
+        recordingFilenameTemplateField.delegate = self
+        recordingFilenameTemplateField.widthAnchor.constraint(greaterThanOrEqualToConstant: 260).isActive = true
+
+        recordingFilenameTemplatePreview = NSTextField(labelWithString: "")
+        recordingFilenameTemplatePreview.font = NSFont.systemFont(ofSize: 10)
+        recordingFilenameTemplatePreview.textColor = .secondaryLabelColor
+        recordingFilenameTemplatePreview.lineBreakMode = .byTruncatingMiddle
+
+        let recFilenameResetBtn = NSButton(title: L("Reset"), target: self, action: #selector(recordingFilenameTemplateReset(_:)))
+        recFilenameResetBtn.bezelStyle = .rounded
+
+        let recFilenameInfoIcon = HoverPopoverIconView(
+            image: NSImage(systemSymbolName: "info.circle", accessibilityDescription: L("Filename tokens")),
+            tintColor: .secondaryLabelColor,
+            toolTip: L("Show available filename tokens")
+        )
+        recFilenameInfoIcon.onHover = { [weak self] sourceView, shown in
+            if shown { self?.showFilenameTemplateInfoPopover(near: sourceView) }
+        }
+
+        stack.addArrangedSubview(labeledRow(L("Filename:"), controls: [recordingFilenameTemplateField, recFilenameInfoIcon, recFilenameResetBtn]))
+        stack.setCustomSpacing(2, after: stack.arrangedSubviews.last!)
+        stack.addArrangedSubview(indented(recordingFilenameTemplatePreview))
         stack.setCustomSpacing(20, after: stack.arrangedSubviews.last!)
+        updateRecordingFilenamePreview()
 
         // ── Behavior ──────────────────────────────────────────
         stack.addArrangedSubview(sectionHeader(L("Behavior")))
@@ -974,7 +1351,7 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
         stack.setCustomSpacing(8, after: stack.arrangedSubviews.last!)
 
         webcamSizePopup = NSPopUpButton()
-        webcamSizePopup.addItems(withTitles: [L("Small"), L("Medium"), L("Large")])
+        webcamSizePopup.addItems(withTitles: [L("Webcam Size Small"), L("Webcam Size Medium"), L("Webcam Size Large"), L("Webcam Size Extra Large")])
         webcamSizePopup.target = self
         webcamSizePopup.action = #selector(webcamSizeChanged(_:))
         stack.addArrangedSubview(labeledRow(L("Size:"), controls: [webcamSizePopup]))
@@ -1292,32 +1669,88 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
         stack.addArrangedSubview(desc)
         stack.setCustomSpacing(20, after: desc)
 
-        // Author
-        let author = NSTextField(labelWithString: "\(L("Made by")) sw33tLie")
-        author.font = NSFont.systemFont(ofSize: 12, weight: .medium)
-        author.textColor = .secondaryLabelColor
-        stack.addArrangedSubview(author)
-        stack.setCustomSpacing(6, after: author)
-
-        // GitHub link
-        let ghBtn = NSButton(title: "github.com/sw33tLie/macshot", target: self, action: #selector(openGitHub))
-        ghBtn.bezelStyle = .inline
-        ghBtn.isBordered = false
-        ghBtn.attributedTitle = NSAttributedString(string: "github.com/sw33tLie/macshot", attributes: [
-            .font: NSFont.systemFont(ofSize: 12),
-            .foregroundColor: NSColor.linkColor,
-            .underlineStyle: NSUnderlineStyle.single.rawValue,
-        ])
-        stack.addArrangedSubview(ghBtn)
-        stack.setCustomSpacing(20, after: ghBtn)
-
         // License
         let license = NSTextField(labelWithString: L("Licensed under the GPLv3"))
         license.font = NSFont.systemFont(ofSize: 11)
         license.textColor = .tertiaryLabelColor
         stack.addArrangedSubview(license)
+        stack.setCustomSpacing(20, after: license)
+
+        // Screen Info (debug) — gathers display & capture metadata, copies to clipboard
+        let screenInfoBtn = NSButton(title: L("Copy Screen Info"), target: self, action: #selector(copyScreenInfo))
+        screenInfoBtn.bezelStyle = .rounded
+        screenInfoBtn.font = NSFont.systemFont(ofSize: 11)
+        screenInfoBtn.tag = 9999  // tag for lookup in action handler
+        stack.addArrangedSubview(screenInfoBtn)
+
+        let screenInfoHint = NSTextField(labelWithString: L("Copies display and capture diagnostics to clipboard"))
+        screenInfoHint.font = NSFont.systemFont(ofSize: 10)
+        screenInfoHint.textColor = .tertiaryLabelColor
+        stack.addArrangedSubview(screenInfoHint)
 
         return container
+    }
+
+    @objc private func copyScreenInfo() {
+        if #available(macOS 14.0, *) {
+            Task { @MainActor in
+                var lines: [String] = []
+                let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+                let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+                lines.append("macshot \(version) (\(build))")
+                lines.append("macOS \(ProcessInfo.processInfo.operatingSystemVersionString)")
+                lines.append("")
+                lines.append("=== NSScreen Info ===")
+                for (i, screen) in NSScreen.screens.enumerated() {
+                    let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? UInt32 ?? 0
+                    let cs = screen.colorSpace?.cgColorSpace
+                    // CGDisplayCopyColorSpace reads the display ICC profile directly,
+                    // bypassing NSScreen — helps diagnose DisplayLink/driver issues.
+                    let cgCS = CGDisplayCopyColorSpace(id)
+                    lines.append("Screen \(i): \(screen.localizedName) (ID: \(id))")
+                    lines.append("  frame: \(screen.frame)")
+                    lines.append("  backingScale: \(screen.backingScaleFactor)")
+                    lines.append("  NSScreen.colorSpace: \(cs?.name as String? ?? "nil")")
+                    lines.append("  CGDisplayCopyColorSpace: \(cgCS.name as String? ?? "nil")")
+                    lines.append("  cs model: \(cs?.model.rawValue ?? -1)")
+                    lines.append("")
+                }
+                do {
+                    let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+                    lines.append("=== ScreenCaptureKit Capture Info ===")
+                    for display in content.displays {
+                        let filter = SCContentFilter(display: display, excludingWindows: [])
+                        let config = SCStreamConfiguration()
+                        config.width = display.width
+                        config.height = display.height
+                        config.captureResolution = .best
+                        config.colorSpaceName = CGColorSpace.sRGB as CFString
+                        if let img = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) {
+                            lines.append("Display \(display.displayID) (\(display.width)x\(display.height)):")
+                            lines.append("  CGImage size: \(img.width)x\(img.height)")
+                            lines.append("  bitsPerComponent: \(img.bitsPerComponent)")
+                            lines.append("  bitsPerPixel: \(img.bitsPerPixel)")
+                            lines.append("  bytesPerRow: \(img.bytesPerRow)")
+                            lines.append("  bitmapInfo: \(img.bitmapInfo.rawValue)")
+                            lines.append("  alphaInfo: \(img.alphaInfo.rawValue)")
+                            lines.append("  colorSpace: \(img.colorSpace?.name as String? ?? "nil")")
+                            lines.append("  cs model: \(img.colorSpace?.model.rawValue ?? -1)")
+                            lines.append("")
+                        }
+                    }
+                } catch {
+                    lines.append("Capture error: \(error.localizedDescription)")
+                }
+                let result = lines.joined(separator: "\n")
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(result, forType: .string)
+                // Flash the button title to confirm
+                if let btn = self.window?.contentView?.viewWithTag(9999) as? NSButton {
+                    btn.title = L("Copied!")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { btn.title = L("Copy Screen Info") }
+                }
+            }
+        }
     }
 
     private func updateGDriveStatus() {
@@ -1519,13 +1952,20 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
         return lbl
     }
 
+    /// Width of the right-aligned label column for `labeledRow`. Wide
+    /// enough to fit the longest localized string in practice — Polish's
+    /// "Szybkie przechwycenie:" (issue #130) used to get clipped at the
+    /// old 140pt column. 180pt covers every shipping locale with a bit
+    /// of headroom.
+    private static let labelColumnWidth: CGFloat = 180
+
     /// A horizontal row: right-aligned label on the left, controls on the right.
     private func labeledRow(_ labelText: String, controls: [NSView]) -> NSView {
         let lbl = NSTextField(labelWithString: labelText)
         lbl.font = NSFont.systemFont(ofSize: 13)
         lbl.alignment = .right
         lbl.translatesAutoresizingMaskIntoConstraints = false
-        lbl.widthAnchor.constraint(equalToConstant: 140).isActive = true
+        lbl.widthAnchor.constraint(equalToConstant: Self.labelColumnWidth).isActive = true
 
         let row = NSStackView(views: [lbl] + controls)
         row.orientation = .horizontal
@@ -1539,7 +1979,8 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
     private func indented(_ view: NSView) -> NSView {
         let spacer = NSView()
         spacer.translatesAutoresizingMaskIntoConstraints = false
-        spacer.widthAnchor.constraint(equalToConstant: 148).isActive = true  // 140 label + 8 spacing
+        // Label column + row spacing (8pt).
+        spacer.widthAnchor.constraint(equalToConstant: Self.labelColumnWidth + 8).isActive = true
 
         let row = NSStackView(views: [spacer, view])
         row.orientation = .horizontal
@@ -1579,16 +2020,18 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
 
         let cols = 2
         let rows = Int(ceil(Double(items.count) / Double(cols)))
-        // Fixed column width so all second-column items align vertically
-        let colWidth: CGFloat = 200
 
         for row in 0..<rows {
             let hStack = NSStackView()
             hStack.orientation = .horizontal
-            hStack.distribution = .fill
+            hStack.distribution = .fillEqually
             hStack.spacing = 0
             hStack.translatesAutoresizingMaskIntoConstraints = false
-            hStack.heightAnchor.constraint(equalToConstant: 28).isActive = true
+            // Row must be AT LEAST 28pt so single-line checkboxes still look
+            // consistent, but can grow if a translated label wraps to two
+            // lines. Without this relaxation, long locale strings get
+            // horizontally clipped (issue #130).
+            hStack.heightAnchor.constraint(greaterThanOrEqualToConstant: 28).isActive = true
 
             for col in 0..<cols {
                 let idx = row * cols + col
@@ -1600,16 +2043,27 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
                     cb.tag = item.tag
                     cb.identifier = NSUserInterfaceItemIdentifier(defaultsKey)
                     cb.translatesAutoresizingMaskIntoConstraints = false
-                    cb.widthAnchor.constraint(equalToConstant: colWidth).isActive = true
+                    // Let the title wrap when it doesn't fit the column —
+                    // the native NSButton checkbox truncates by default.
+                    // Word-wrap is graceful; the cell takes a second line
+                    // of text when needed instead of swallowing characters.
+                    cb.cell?.wraps = true
+                    cb.cell?.isScrollable = false
+                    cb.cell?.lineBreakMode = .byWordWrapping
+                    if let cell = cb.cell as? NSButtonCell {
+                        cell.usesSingleLineMode = false
+                    }
                     hStack.addArrangedSubview(cb)
                 } else {
                     let filler = NSView()
                     filler.translatesAutoresizingMaskIntoConstraints = false
-                    filler.widthAnchor.constraint(equalToConstant: colWidth).isActive = true
                     hStack.addArrangedSubview(filler)
                 }
             }
             vStack.addArrangedSubview(hStack)
+            // Stretch row to fill the vStack's width (must be after addArrangedSubview
+            // so both views share a common ancestor)
+            hStack.widthAnchor.constraint(equalTo: vStack.widthAnchor).isActive = true
         }
 
         return box
@@ -1631,11 +2085,13 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
             UserDefaults.standard.set(legacyAutoCopy ? 0 : 1, forKey: "ocrAction")
         }
         ocrActionPopup.selectItem(at: UserDefaults.standard.integer(forKey: "ocrAction"))
+        captureMenuOrder = CaptureMenuItemID.orderedItems()
+        rebuildCaptureMenuOrderRows()
 
         let copySound = UserDefaults.standard.object(forKey: "playCopySound") as? Bool ?? true
         copySoundCheckbox.state = copySound ? .on : .off
 
-        rememberSelectionCheckbox.state = UserDefaults.standard.bool(forKey: "rememberLastSelection") ? .on : .off
+        // rememberSelectionCheckbox removed
 
         let rememberTool = UserDefaults.standard.object(forKey: "rememberLastTool") as? Bool ?? true
         rememberToolCheckbox.state = rememberTool ? .on : .off
@@ -1650,6 +2106,14 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
         let stacking = UserDefaults.standard.object(forKey: "thumbnailStacking") as? Bool ?? true
         thumbnailStackingPopup.selectItem(at: stacking ? 0 : 1)
 
+        let thumbnailCorner = UserDefaults.standard.string(forKey: "thumbnailCorner") ?? "bottomRight"
+        switch thumbnailCorner {
+        case "bottomLeft": thumbnailCornerPopup.selectItem(at: 1)
+        case "topRight": thumbnailCornerPopup.selectItem(at: 2)
+        case "topLeft": thumbnailCornerPopup.selectItem(at: 3)
+        default: thumbnailCornerPopup.selectItem(at: 0)
+        }
+
         let launchAtLogin = UserDefaults.standard.bool(forKey: "launchAtLogin")
         launchAtLoginCheckbox.state = launchAtLogin ? .on : .off
 
@@ -1659,7 +2123,11 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
         snapGuidesCheckbox.state = snapGuides ? .on : .off
 
         captureCursorCheckbox.state = UserDefaults.standard.bool(forKey: "captureCursor") ? .on : .off
-        windowTitleCheckbox.state = UserDefaults.standard.bool(forKey: "useWindowTitleInFilename") ? .on : .off
+        doubleClickToCopyCheckbox.state = (UserDefaults.standard.object(forKey: "doubleClickToCopy") as? Bool ?? true) ? .on : .off
+        filenameTemplateField.stringValue = UserDefaults.standard.string(forKey: FilenameFormatter.userDefaultsKey) ?? FilenameFormatter.defaultTemplate
+        updateFilenamePreview()
+        recordingFilenameTemplateField.stringValue = UserDefaults.standard.string(forKey: FilenameFormatter.recordingUserDefaultsKey) ?? FilenameFormatter.defaultRecordingTemplate
+        updateRecordingFilenamePreview()
 
         let autoUpdate = UserDefaults.standard.object(forKey: "SUEnableAutomaticChecks") as? Bool ?? true
         autoUpdateCheckbox.state = autoUpdate ? .on : .off
@@ -1703,8 +2171,6 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
         qualityLabel.stringValue = String(format: L("%d%%"), quality)
 
         downscaleRetinaCheckbox.state = ImageEncoder.downscaleRetina ? .on : .off
-        embedColorProfileCheckbox.state = ImageEncoder.embedColorProfile ? .on : .off
-
         updateQualityVisibility()
 
         imgbbKeyField.stringValue = UserDefaults.standard.string(forKey: "imgbbAPIKey") ?? ""
@@ -1739,6 +2205,7 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
         case "small": webcamSizePopup.selectItem(at: 0)
         case "medium": webcamSizePopup.selectItem(at: 1)
         case "large": webcamSizePopup.selectItem(at: 2)
+        case "xlarge": webcamSizePopup.selectItem(at: 3)
         default: webcamSizePopup.selectItem(at: 1)
         }
 
@@ -1785,9 +2252,6 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
     @objc private func copySoundChanged(_ sender: NSButton) {
         UserDefaults.standard.set(sender.state == .on, forKey: "playCopySound")
     }
-    @objc private func rememberSelectionChanged(_ sender: NSButton) {
-        UserDefaults.standard.set(sender.state == .on, forKey: "rememberLastSelection")
-    }
     @objc private func rememberToolChanged(_ sender: NSButton) {
         UserDefaults.standard.set(sender.state == .on, forKey: "rememberLastTool")
     }
@@ -1809,6 +2273,10 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
 
     @objc private func thumbnailStackingChanged(_ sender: NSPopUpButton) {
         UserDefaults.standard.set(sender.indexOfSelectedItem == 0, forKey: "thumbnailStacking")
+    }
+    @objc private func thumbnailCornerChanged(_ sender: NSPopUpButton) {
+        let values = ["bottomRight", "bottomLeft", "topRight", "topLeft"]
+        UserDefaults.standard.set(values[sender.indexOfSelectedItem], forKey: "thumbnailCorner")
     }
     @objc private func quickModeChanged(_ sender: NSPopUpButton) {
         UserDefaults.standard.set(sender.indexOfSelectedItem, forKey: "quickCaptureMode")
@@ -1836,9 +2304,6 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
     }
     @objc private func downscaleRetinaChanged(_ sender: NSButton) {
         UserDefaults.standard.set(sender.state == .on, forKey: "downscaleRetina")
-    }
-    @objc private func embedColorProfileChanged(_ sender: NSButton) {
-        UserDefaults.standard.set(sender.state == .on, forKey: "embedColorProfile")
     }
     @objc private func imgbbKeyChanged(_ sender: NSTextField) {
         let key = sender.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1884,7 +2349,7 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
     }
 
     @objc private func webcamSizeChanged(_ sender: NSPopUpButton) {
-        let values = ["small", "medium", "large"]
+        let values = ["small", "medium", "large", "xlarge"]
         UserDefaults.standard.set(values[sender.indexOfSelectedItem], forKey: "webcamSize")
     }
 
@@ -1940,21 +2405,108 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
     @objc private func accentColorChanged(_ sender: NSColorWell) {
         ToolbarLayout.saveAccentColor(sender.color)
         notifyToolbarColorChange()
+        updateThemePresetSelection()
     }
     @objc private func iconColorChanged(_ sender: NSColorWell) {
         ToolbarLayout.saveIconColor(sender.color)
         notifyToolbarColorChange()
+        updateThemePresetSelection()
     }
     @objc private func bgColorChanged(_ sender: NSColorWell) {
         ToolbarLayout.saveBgColor(sender.color)
         notifyToolbarColorChange()
+        updateThemePresetSelection()
     }
-    @objc private func resetToolbarColors(_ sender: NSButton) {
-        ToolbarLayout.resetColors()
-        accentColorWell.color = ToolbarLayout.defaultAccentColor
-        iconColorWell.color = ToolbarLayout.defaultIconColor
-        bgColorWell.color = ToolbarLayout.defaultBgColor
+    // MARK: - Theme presets
+
+    private struct ThemePreset {
+        let name: String
+        let accent: NSColor
+        let icon: NSColor
+        let bg: NSColor
+
+        static let all: [ThemePreset] = [
+            ThemePreset(name: "Default",
+                        accent: ToolbarLayout.defaultAccentColor,
+                        icon:   ToolbarLayout.defaultIconColor,
+                        bg:     ToolbarLayout.defaultBgColor),
+            ThemePreset(name: "Classic",
+                        accent: NSColor(calibratedRed: 0.00, green: 0.48, blue: 1.00, alpha: 1.0),
+                        icon:   .white,
+                        bg:     NSColor(white: 0.12, alpha: 1.0)),
+            ThemePreset(name: "Ocean",
+                        accent: NSColor(calibratedRed: 0.20, green: 0.70, blue: 0.75, alpha: 1.0),
+                        icon:   .white,
+                        bg:     NSColor(calibratedRed: 0.08, green: 0.12, blue: 0.18, alpha: 1.0)),
+            ThemePreset(name: "Sunset",
+                        accent: NSColor(calibratedRed: 1.00, green: 0.55, blue: 0.20, alpha: 1.0),
+                        icon:   .white,
+                        bg:     NSColor(calibratedRed: 0.15, green: 0.10, blue: 0.12, alpha: 1.0)),
+            ThemePreset(name: "Forest",
+                        accent: NSColor(calibratedRed: 0.30, green: 0.75, blue: 0.45, alpha: 1.0),
+                        icon:   .white,
+                        bg:     NSColor(calibratedRed: 0.08, green: 0.14, blue: 0.10, alpha: 1.0)),
+            ThemePreset(name: "Mono",
+                        accent: NSColor(white: 0.30, alpha: 1.0),
+                        icon:   .white,
+                        bg:     NSColor(white: 0.10, alpha: 1.0)),
+        ]
+    }
+
+    private func makeColorColumn(well: NSColorWell, caption: String) -> NSView {
+        let label = NSTextField(labelWithString: caption)
+        label.font = NSFont.systemFont(ofSize: 11)
+        label.textColor = .secondaryLabelColor
+        label.alignment = .center
+
+        let col = NSStackView(views: [well, label])
+        col.orientation = .vertical
+        col.alignment = .centerX
+        col.spacing = 4
+        col.translatesAutoresizingMaskIntoConstraints = false
+        return col
+    }
+
+    @objc private func themePresetChanged(_ sender: NSPopUpButton) {
+        let idx = sender.indexOfSelectedItem
+        guard idx < ThemePreset.all.count else { return } // "Custom" — no-op
+        applyThemePreset(ThemePreset.all[idx])
+    }
+
+    private func applyThemePreset(_ preset: ThemePreset) {
+        ToolbarLayout.saveAccentColor(preset.accent)
+        ToolbarLayout.saveIconColor(preset.icon)
+        ToolbarLayout.saveBgColor(preset.bg)
+        accentColorWell.color = preset.accent
+        iconColorWell.color = preset.icon
+        bgColorWell.color = preset.bg
         notifyToolbarColorChange()
+        updateThemePresetSelection()
+    }
+
+    private func updateThemePresetSelection() {
+        guard let popup = themePresetPopup else { return }
+        let current = (ToolbarLayout.accentColor, ToolbarLayout.iconColor, ToolbarLayout.bgColor)
+        for (i, preset) in ThemePreset.all.enumerated() {
+            if colorsClose(current.0, preset.accent) &&
+               colorsClose(current.1, preset.icon) &&
+               colorsClose(current.2, preset.bg) {
+                popup.selectItem(at: i)
+                return
+            }
+        }
+        // No match — select "Custom" (the last item)
+        popup.selectItem(at: ThemePreset.all.count)
+    }
+
+    /// Compare two NSColors in sRGB with a small tolerance (color picker rounding).
+    private func colorsClose(_ a: NSColor, _ b: NSColor) -> Bool {
+        guard let x = a.usingColorSpace(.sRGB), let y = b.usingColorSpace(.sRGB) else { return false }
+        let tol: CGFloat = 0.01
+        return abs(x.redComponent - y.redComponent) < tol
+            && abs(x.greenComponent - y.greenComponent) < tol
+            && abs(x.blueComponent - y.blueComponent) < tol
+            && abs(x.alphaComponent - y.alphaComponent) < tol
     }
     private func notifyToolbarColorChange() {
         NotificationCenter.default.post(name: .toolbarColorsDidChange, object: nil)
@@ -1974,8 +2526,67 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
     @objc private func captureCursorChanged(_ sender: NSButton) {
         UserDefaults.standard.set(sender.state == .on, forKey: "captureCursor")
     }
-    @objc private func windowTitleChanged(_ sender: NSButton) {
-        UserDefaults.standard.set(sender.state == .on, forKey: "useWindowTitleInFilename")
+    @objc private func doubleClickToCopyChanged(_ sender: NSButton) {
+        UserDefaults.standard.set(sender.state == .on, forKey: "doubleClickToCopy")
+    }
+    @objc private func filenameTemplateCommitted(_ sender: NSTextField) {
+        let trimmed = sender.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = trimmed.isEmpty ? FilenameFormatter.defaultTemplate : sender.stringValue
+        if trimmed.isEmpty {
+            sender.stringValue = FilenameFormatter.defaultTemplate
+        }
+        UserDefaults.standard.set(value, forKey: FilenameFormatter.userDefaultsKey)
+        updateFilenamePreview()
+    }
+
+    @objc private func filenameTemplateReset(_ sender: NSButton) {
+        filenameTemplateField.stringValue = FilenameFormatter.defaultTemplate
+        UserDefaults.standard.set(FilenameFormatter.defaultTemplate, forKey: FilenameFormatter.userDefaultsKey)
+        updateFilenamePreview()
+    }
+
+    fileprivate func updateFilenamePreview() {
+        guard let field = filenameTemplateField, let preview = filenameTemplatePreview else { return }
+        let raw = field.stringValue
+        let template = raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? FilenameFormatter.defaultTemplate : raw
+        let sampleDate = sampleFilenameDate()
+        let sampleWindow = template.contains("{window}") ? "Example Window" : nil
+        let sampleIndex = template.contains("{index}") ? 1 : nil
+        let base = FilenameFormatter.format(template: template, windowTitle: sampleWindow, index: sampleIndex, date: sampleDate)
+        preview.stringValue = "\(L("Preview:")) \(base).\(ImageEncoder.fileExtension)"
+    }
+
+    @objc private func recordingFilenameTemplateCommitted(_ sender: NSTextField) {
+        let trimmed = sender.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = trimmed.isEmpty ? FilenameFormatter.defaultRecordingTemplate : sender.stringValue
+        if trimmed.isEmpty {
+            sender.stringValue = FilenameFormatter.defaultRecordingTemplate
+        }
+        UserDefaults.standard.set(value, forKey: FilenameFormatter.recordingUserDefaultsKey)
+        updateRecordingFilenamePreview()
+    }
+
+    @objc private func recordingFilenameTemplateReset(_ sender: NSButton) {
+        recordingFilenameTemplateField.stringValue = FilenameFormatter.defaultRecordingTemplate
+        UserDefaults.standard.set(FilenameFormatter.defaultRecordingTemplate, forKey: FilenameFormatter.recordingUserDefaultsKey)
+        updateRecordingFilenamePreview()
+    }
+
+    fileprivate func updateRecordingFilenamePreview() {
+        guard let field = recordingFilenameTemplateField, let preview = recordingFilenameTemplatePreview else { return }
+        let raw = field.stringValue
+        let template = raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? FilenameFormatter.defaultRecordingTemplate : raw
+        let sampleDate = sampleFilenameDate()
+        let sampleIndex = template.contains("{index}") ? 1 : nil
+        let base = FilenameFormatter.format(template: template, windowTitle: nil, index: sampleIndex, date: sampleDate, fallback: FilenameFormatter.defaultRecordingTemplate)
+        preview.stringValue = "\(L("Preview:")) \(base).mp4"
+    }
+
+    private func sampleFilenameDate() -> Date {
+        var comps = DateComponents()
+        comps.year = 2026; comps.month = 4; comps.day = 17
+        comps.hour = 14; comps.minute = 22; comps.second = 5
+        return Calendar(identifier: .gregorian).date(from: comps) ?? Date()
     }
     @objc private func launchAtLoginChanged(_ sender: NSButton) {
         let enabled = sender.state == .on
@@ -1990,6 +2601,101 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
                 #endif
             }
         }
+    }
+
+    @objc private func urlSchemeChanged(_ sender: NSButton) {
+        UserDefaults.standard.set(sender.state == .on, forKey: "urlSchemeEnabled")
+    }
+
+    fileprivate var urlSchemeInfoPopover: NSPopover?
+    fileprivate var filenameTemplateInfoPopover: NSPopover?
+
+    fileprivate func showURLSchemeInfoPopover(near sourceView: NSView) {
+        if let existing = urlSchemeInfoPopover, existing.isShown { return }
+
+        let commands: [(String, String)] = [
+            ("macshot://capture",             L("Start area capture")),
+            ("macshot://capture-fullscreen",  L("Capture the full screen")),
+            ("macshot://capture-last",        L("Re-capture the last selected area")),
+            ("macshot://quick-capture",       L("Quick capture (uses your Enter action)")),
+            ("macshot://ocr",                 L("Capture area and extract text")),
+            ("macshot://record",              L("Start area recording")),
+            ("macshot://record-fullscreen",   L("Start full-screen recording")),
+            ("macshot://stop-recording",      L("Stop the current recording")),
+            ("macshot://scroll-capture",      L("Start scroll capture")),
+            ("macshot://history",             L("Open the recent captures overlay")),
+            ("macshot://settings",            L("Open this settings window")),
+            ("macshot://open?file=/path.png", L("Open an image file in the editor")),
+        ]
+
+        let title = NSTextField(labelWithString: L("Supported URL Scheme Commands"))
+        title.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        title.translatesAutoresizingMaskIntoConstraints = false
+
+        let subtitle = NSTextField(wrappingLabelWithString: L("Trigger macshot from Raycast, Alfred, Shortcuts, or any tool that opens URLs."))
+        subtitle.font = NSFont.systemFont(ofSize: 11)
+        subtitle.textColor = .secondaryLabelColor
+        subtitle.preferredMaxLayoutWidth = 440
+        subtitle.translatesAutoresizingMaskIntoConstraints = false
+
+        // NSGridView for perfect column alignment — each row's cmd column and
+        // desc column line up precisely regardless of text width.
+        let grid = NSGridView(numberOfColumns: 2, rows: commands.count)
+        grid.translatesAutoresizingMaskIntoConstraints = false
+        grid.rowSpacing = 4
+        grid.columnSpacing = 16
+        grid.column(at: 0).xPlacement = .leading
+        grid.column(at: 1).xPlacement = .leading
+
+        for (i, entry) in commands.enumerated() {
+            let cmdLabel = NSTextField(labelWithString: entry.0)
+            cmdLabel.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+            cmdLabel.textColor = .labelColor
+            cmdLabel.isSelectable = true
+
+            let descLabel = NSTextField(labelWithString: entry.1)
+            descLabel.font = NSFont.systemFont(ofSize: 11)
+            descLabel.textColor = .secondaryLabelColor
+
+            grid.cell(atColumnIndex: 0, rowIndex: i).contentView = cmdLabel
+            grid.cell(atColumnIndex: 1, rowIndex: i).contentView = descLabel
+        }
+
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(title)
+        container.addSubview(subtitle)
+        container.addSubview(grid)
+
+        let pad: CGFloat = 14
+        NSLayoutConstraint.activate([
+            title.topAnchor.constraint(equalTo: container.topAnchor, constant: pad),
+            title.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: pad),
+            title.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -pad),
+
+            subtitle.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 4),
+            subtitle.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: pad),
+            subtitle.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -pad),
+
+            grid.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: 12),
+            grid.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: pad),
+            grid.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -pad),
+            grid.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -pad),
+        ])
+
+        let vc = NSViewController()
+        vc.view = container
+
+        // Compute fitting size for the popover
+        container.layoutSubtreeIfNeeded()
+        let fitting = container.fittingSize
+
+        let popover = NSPopover()
+        popover.contentViewController = vc
+        popover.behavior = .transient
+        popover.contentSize = fitting
+        popover.show(relativeTo: sourceView.bounds, of: sourceView, preferredEdge: .maxY)
+        urlSchemeInfoPopover = popover
     }
 
     @objc private func hideMenuBarIconChanged(_ sender: NSButton) {
@@ -2016,14 +2722,6 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
         }
     }
 
-    // MARK: - NSTabViewDelegate
-
-    func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
-        if tabViewItem?.identifier as? String == "uploads" {
-            reloadUploadsTab()
-        }
-    }
-
     func showWindow() {
         loadSettings()
         window?.center()
@@ -2034,5 +2732,121 @@ class SettingsWindowController: NSWindowController, NSTabViewDelegate, NSWindowD
 
     func windowWillClose(_ notification: Notification) {
         (NSApp.delegate as? AppDelegate)?.returnFocusIfNeeded()
+    }
+}
+
+// MARK: - NSTextFieldDelegate (live filename preview)
+
+extension SettingsWindowController: NSTextFieldDelegate {
+    func controlTextDidChange(_ obj: Notification) {
+        guard let field = obj.object as? NSTextField else { return }
+        if field === filenameTemplateField {
+            // Save on every keystroke so closing the window without pressing
+            // Enter doesn't silently lose the edit. Empty value resets to
+            // the default template at commit time (see controlTextDidEndEditing).
+            UserDefaults.standard.set(field.stringValue, forKey: FilenameFormatter.userDefaultsKey)
+            updateFilenamePreview()
+        } else if field === recordingFilenameTemplateField {
+            UserDefaults.standard.set(field.stringValue, forKey: FilenameFormatter.recordingUserDefaultsKey)
+            updateRecordingFilenamePreview()
+        }
+    }
+
+    func controlTextDidEndEditing(_ obj: Notification) {
+        // On commit, replace empty/whitespace-only values with the default so
+        // the user never ends up with a blank template saved.
+        guard let field = obj.object as? NSTextField else { return }
+        let trimmed = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if field === filenameTemplateField, trimmed.isEmpty {
+            field.stringValue = FilenameFormatter.defaultTemplate
+            UserDefaults.standard.set(FilenameFormatter.defaultTemplate, forKey: FilenameFormatter.userDefaultsKey)
+            updateFilenamePreview()
+        } else if field === recordingFilenameTemplateField, trimmed.isEmpty {
+            field.stringValue = FilenameFormatter.defaultRecordingTemplate
+            UserDefaults.standard.set(FilenameFormatter.defaultRecordingTemplate, forKey: FilenameFormatter.recordingUserDefaultsKey)
+            updateRecordingFilenamePreview()
+        }
+    }
+}
+
+// MARK: - Filename template info popover
+
+extension SettingsWindowController {
+    fileprivate func showFilenameTemplateInfoPopover(near sourceView: NSView) {
+        if let existing = filenameTemplateInfoPopover, existing.isShown { return }
+
+        let tokens: [(String, String)] = [
+            ("{date}",      "2026-04-17"),
+            ("{time}",      "14-22-05"),
+            ("{timestamp}", "2026-04-17_14-22-05"),
+            ("{unix}",      "1745592125"),
+            ("{window}",    L("Screenshots only — captured window title (blank otherwise)")),
+            ("{index}",     L("Counter for multi-screen captures")),
+            ("{random}",    L("8-character random string (e.g. k3j7x9q2)")),
+        ]
+
+        let title = NSTextField(labelWithString: L("Filename Template Tokens"))
+        title.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        title.translatesAutoresizingMaskIntoConstraints = false
+
+        let subtitle = NSTextField(wrappingLabelWithString: L("The file extension is appended automatically. Slashes and colons in {window} become dashes."))
+        subtitle.font = NSFont.systemFont(ofSize: 11)
+        subtitle.textColor = .secondaryLabelColor
+        subtitle.preferredMaxLayoutWidth = 380
+        subtitle.translatesAutoresizingMaskIntoConstraints = false
+
+        let grid = NSGridView(numberOfColumns: 2, rows: tokens.count)
+        grid.translatesAutoresizingMaskIntoConstraints = false
+        grid.rowSpacing = 4
+        grid.columnSpacing = 16
+        grid.column(at: 0).xPlacement = .leading
+        grid.column(at: 1).xPlacement = .leading
+
+        for (i, entry) in tokens.enumerated() {
+            let tok = NSTextField(labelWithString: entry.0)
+            tok.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+            tok.textColor = .labelColor
+            tok.isSelectable = true
+
+            let desc = NSTextField(labelWithString: entry.1)
+            desc.font = NSFont.systemFont(ofSize: 11)
+            desc.textColor = .secondaryLabelColor
+
+            grid.cell(atColumnIndex: 0, rowIndex: i).contentView = tok
+            grid.cell(atColumnIndex: 1, rowIndex: i).contentView = desc
+        }
+
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(title)
+        container.addSubview(subtitle)
+        container.addSubview(grid)
+
+        let pad: CGFloat = 14
+        NSLayoutConstraint.activate([
+            title.topAnchor.constraint(equalTo: container.topAnchor, constant: pad),
+            title.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: pad),
+            title.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -pad),
+
+            subtitle.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 4),
+            subtitle.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: pad),
+            subtitle.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -pad),
+
+            grid.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: 12),
+            grid.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: pad),
+            grid.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -pad),
+            grid.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -pad),
+        ])
+
+        let vc = NSViewController()
+        vc.view = container
+        container.layoutSubtreeIfNeeded()
+        vc.preferredContentSize = container.fittingSize
+
+        let popover = NSPopover()
+        popover.contentViewController = vc
+        popover.behavior = .transient
+        popover.show(relativeTo: sourceView.bounds, of: sourceView, preferredEdge: .maxY)
+        filenameTemplateInfoPopover = popover
     }
 }
