@@ -1,11 +1,9 @@
 name: Sync Fork (自动获取上游)
 
-
 on:
   schedule:
     - cron: "0 0 * * *"
   workflow_dispatch:
-
 
 permissions:
   contents: write
@@ -25,16 +23,14 @@ jobs:
           echo "upstream=$UPSTREAM" >> $GITHUB_OUTPUT
           echo "✅ 上游仓库: $UPSTREAM"
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
+          GITHUB_TOKEN: ${{ secrets.PAT }}
 
       - name: Sync with upstream (默认分支)
         run: |
           echo "开始同步 fork → 使用上游默认分支"
 
-
           gh repo sync ${{ github.repository }} \
             --source ${{ steps.get-upstream.outputs.upstream }} \
             --force
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.PAT }}
