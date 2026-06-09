@@ -30,6 +30,7 @@
 "Show History Panel" = "แสดงแผงประวัติ";
 "Open Image..." = "เปิดรูปภาพ...";
 "Open from Clipboard" = "เปิดจากคลิปบอร์ด";
+"Pin from Clipboard" = "ปักหมุดจากคลิปบอร์ด";
 "Preferences..." = "การตั้งค่า...";
 "Check for Updates..." = "ตรวจสอบอัปเดต...";
 "Quit macshot" = "ออกจาก macshot";
@@ -190,6 +191,7 @@
 "Show snap alignment guides" = "แสดงเส้นจัดแนว";
 "Capture mouse cursor in screenshot" = "จับภาพเคอร์เซอร์เมาส์ในภาพหน้าจอ";
 "Double-click selection to copy" = "ดับเบิลคลิกที่พื้นที่ที่เลือกเพื่อคัดลอก";
+"Hide capture instructions" = "ซ่อนคำแนะนำการจับภาพหน้าจอ";
 "Use window title in saved filename" = "ใช้ชื่อหน้าต่างในชื่อไฟล์ที่บันทึก";
 "Hide menu bar icon" = "ซ่อนไอคอนแถบเมนู";
 "Hotkeys still work. To show the icon again, re-launch macshot." = "ปุ่มลัดยังใช้งานได้ เปิด macshot ใหม่เพื่อแสดงไอคอนอีกครั้ง";
@@ -321,7 +323,9 @@
 
 /* Alerts */
 "No Image on Clipboard" = "ไม่มีรูปภาพในคลิปบอร์ด";
+"No Image or Text on Clipboard" = "ไม่มีรูปภาพหรือข้อความในคลิปบอร์ด";
 "Copy an image to the clipboard first, then try again." = "คัดลอกรูปภาพไปยังคลิปบอร์ดก่อน แล้วลองอีกครั้ง";
+"Copy an image or text to the clipboard first, then try again." = "คัดลอกรูปภาพหรือข้อความไปยังคลิปบอร์ดก่อน แล้วลองอีกครั้ง";
 "OK" = "ตกลง";
 "Accessibility Access Required" = "ต้องการสิทธิ์การเข้าถึง";
 "macshot needs Accessibility permission to auto-scroll other apps. Please grant access in System Settings, then try again." = "macshot ต้องการสิทธิ์การเข้าถึงเพื่อเลื่อนแอปอื่นอัตโนมัติ กรุณาอนุญาตในการตั้งค่าระบบ แล้วลองอีกครั้ง";

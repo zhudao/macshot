@@ -30,6 +30,7 @@
 "Show History Panel" = "ইতিহাস প্যানেল দেখান";
 "Open Image..." = "ছবি খুলুন...";
 "Open from Clipboard" = "ক্লিপবোর্ড থেকে খুলুন";
+"Pin from Clipboard" = "ক্লিপবোর্ড থেকে পিন করুন";
 "Preferences..." = "পছন্দসমূহ...";
 "Check for Updates..." = "আপডেট পরীক্ষা করুন...";
 "Quit macshot" = "macshot বন্ধ করুন";
@@ -190,6 +191,7 @@
 "Show snap alignment guides" = "স্ন্যাপ সারিবদ্ধকরণ গাইড দেখান";
 "Capture mouse cursor in screenshot" = "স্ক্রিনশটে মাউস কার্সর ক্যাপচার করুন";
 "Double-click selection to copy" = "কপি করতে নির্বাচনে ডাবল-ক্লিক করুন";
+"Hide capture instructions" = "ক্যাপচার নির্দেশাবলী লুকান";
 "Use window title in saved filename" = "সংরক্ষিত ফাইলনামে উইন্ডো শিরোনাম ব্যবহার করুন";
 "Hide menu bar icon" = "মেনু বার আইকন লুকান";
 "Hotkeys still work. To show the icon again, re-launch macshot." = "হটকি এখনও কাজ করে। আইকন আবার দেখাতে macshot পুনরায় চালু করুন।";
@@ -322,7 +324,9 @@
 
 /* Alerts */
 "No Image on Clipboard" = "ক্লিপবোর্ডে কোনো ছবি নেই";
+"No Image or Text on Clipboard" = "ক্লিপবোর্ডে কোনো ছবি বা টেক্সট নেই";
 "Copy an image to the clipboard first, then try again." = "প্রথমে ক্লিপবোর্ডে একটি ছবি কপি করুন, তারপর আবার চেষ্টা করুন।";
+"Copy an image or text to the clipboard first, then try again." = "প্রথমে ক্লিপবোর্ডে একটি ছবি বা টেক্সট কপি করুন, তারপর আবার চেষ্টা করুন।";
 "OK" = "ঠিক আছে";
 "Accessibility Access Required" = "অ্যাক্সেসিবিলিটি অ্যাক্সেস প্রয়োজন";
 "macshot needs Accessibility permission to auto-scroll other apps. Please grant access in System Settings, then try again." = "অন্য অ্যাপ স্বয়ংক্রিয়ভাবে স্ক্রল করতে macshot-এর অ্যাক্সেসিবিলিটি অনুমতি প্রয়োজন। অনুগ্রহ করে সিস্টেম সেটিংসে অ্যাক্সেস দিন, তারপর আবার চেষ্টা করুন।";

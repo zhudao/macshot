@@ -30,6 +30,7 @@
 "Show History Panel" = "عرض لوحة السجل";
 "Open Image..." = "فتح صورة...";
 "Open from Clipboard" = "فتح من الحافظة";
+"Pin from Clipboard" = "تثبيت من الحافظة";
 "Preferences..." = "التفضيلات...";
 "Check for Updates..." = "التحقق من التحديثات...";
 "Quit macshot" = "إنهاء macshot";
@@ -190,6 +191,7 @@
 "Show snap alignment guides" = "عرض خطوط المحاذاة";
 "Capture mouse cursor in screenshot" = "التقاط مؤشر الفأرة في لقطة الشاشة";
 "Double-click selection to copy" = "النقر المزدوج على التحديد للنسخ";
+"Hide capture instructions" = "إخفاء تعليمات الالتقاط";
 "Use window title in saved filename" = "استخدام عنوان النافذة في اسم الملف المحفوظ";
 "Hide menu bar icon" = "إخفاء أيقونة شريط القوائم";
 "Hotkeys still work. To show the icon again, re-launch macshot." = "الاختصارات لا تزال تعمل. لإظهار الأيقونة مجددًا، أعد تشغيل macshot.";
@@ -322,7 +324,9 @@
 
 /* Alerts */
 "No Image on Clipboard" = "لا توجد صورة في الحافظة";
+"No Image or Text on Clipboard" = "لا توجد صورة أو نص في الحافظة";
 "Copy an image to the clipboard first, then try again." = "انسخ صورة إلى الحافظة أولًا، ثم حاول مجددًا.";
+"Copy an image or text to the clipboard first, then try again." = "انسخ صورة أو نصًا إلى الحافظة أولًا، ثم حاول مجددًا.";
 "OK" = "موافق";
 "Accessibility Access Required" = "مطلوب إذن الوصول";
 "macshot needs Accessibility permission to auto-scroll other apps. Please grant access in System Settings, then try again." = "يحتاج macshot إلى إذن تسهيلات الاستخدام للتمرير التلقائي في التطبيقات الأخرى. يرجى منح الإذن في إعدادات النظام، ثم المحاولة مجددًا.";

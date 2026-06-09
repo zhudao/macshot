@@ -30,6 +30,7 @@
 "Show History Panel" = "Geschiedenispaneel tonen";
 "Open Image..." = "Afbeelding openen...";
 "Open from Clipboard" = "Openen vanuit klembord";
+"Pin from Clipboard" = "Vastpinnen vanuit klembord";
 "Preferences..." = "Instellingen...";
 "Check for Updates..." = "Controleer op updates...";
 "Quit macshot" = "Stop macshot";
@@ -190,6 +191,7 @@
 "Show snap alignment guides" = "Uitlijnhulplijnen tonen";
 "Capture mouse cursor in screenshot" = "Muiscursor vastleggen in schermafbeelding";
 "Double-click selection to copy" = "Dubbelklik op selectie om te kopiëren";
+"Hide capture instructions" = "Opname-instructies verbergen";
 "Use window title in saved filename" = "Venstertitel gebruiken in bestandsnaam";
 "Hide menu bar icon" = "Menubalkpictogram verbergen";
 "Hotkeys still work. To show the icon again, re-launch macshot." = "Sneltoetsen werken nog steeds. Start macshot opnieuw op om het pictogram weer te tonen.";
@@ -321,7 +323,9 @@
 
 /* Alerts */
 "No Image on Clipboard" = "Geen afbeelding op klembord";
+"No Image or Text on Clipboard" = "Geen afbeelding of tekst op klembord";
 "Copy an image to the clipboard first, then try again." = "Kopieer eerst een afbeelding naar het klembord en probeer het opnieuw.";
+"Copy an image or text to the clipboard first, then try again." = "Kopieer eerst een afbeelding of tekst naar het klembord en probeer het opnieuw.";
 "OK" = "OK";
 "Accessibility Access Required" = "Toegankelijkheidstoegang vereist";
 "macshot needs Accessibility permission to auto-scroll other apps. Please grant access in System Settings, then try again." = "macshot heeft toegankelijkheidstoegang nodig om automatisch in andere apps te scrollen. Verleen toegang in Systeeminstellingen en probeer het opnieuw.";

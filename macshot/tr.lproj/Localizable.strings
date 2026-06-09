@@ -30,6 +30,7 @@
 "Show History Panel" = "Geçmiş Panelini Göster";
 "Open Image..." = "Görsel Aç...";
 "Open from Clipboard" = "Panodan Aç";
+"Pin from Clipboard" = "Panodan Sabitle";
 "Preferences..." = "Tercihler...";
 "Check for Updates..." = "Güncellemeleri Denetle...";
 "Quit macshot" = "macshot'tan Çık";
@@ -190,6 +191,7 @@
 "Show snap alignment guides" = "Hizalama kılavuzlarını göster";
 "Capture mouse cursor in screenshot" = "Ekran görüntüsünde fare imlecini yakala";
 "Double-click selection to copy" = "Kopyalamak için seçime çift tıkla";
+"Hide capture instructions" = "Yakalama talimatlarını gizle";
 "Use window title in saved filename" = "Kaydedilen dosya adında pencere başlığını kullan";
 "Hide menu bar icon" = "Menü çubuğu simgesini gizle";
 "Hotkeys still work. To show the icon again, re-launch macshot." = "Kısayol tuşları çalışmaya devam eder. Simgeyi tekrar göstermek için macshot'u yeniden başlatın.";
@@ -322,7 +324,9 @@
 
 /* Alerts */
 "No Image on Clipboard" = "Panoda Görsel Yok";
+"No Image or Text on Clipboard" = "Panoda Görsel veya Metin Yok";
 "Copy an image to the clipboard first, then try again." = "Önce panoya bir görsel kopyalayın, ardından tekrar deneyin.";
+"Copy an image or text to the clipboard first, then try again." = "Önce panoya bir görsel veya metin kopyalayın, ardından tekrar deneyin.";
 "OK" = "Tamam";
 "Accessibility Access Required" = "Erişilebilirlik İzni Gerekli";
 "macshot needs Accessibility permission to auto-scroll other apps. Please grant access in System Settings, then try again." = "macshot, diğer uygulamaları otomatik kaydırmak için Erişilebilirlik iznine ihtiyaç duyar. Lütfen Sistem Ayarları'ndan izin verin ve tekrar deneyin.";

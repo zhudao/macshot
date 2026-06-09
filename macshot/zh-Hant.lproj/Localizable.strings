@@ -30,6 +30,7 @@
 "Show History Panel" = "顯示歷史記錄面板";
 "Open Image..." = "開啟影像⋯";
 "Open from Clipboard" = "從剪貼簿開啟";
+"Pin from Clipboard" = "從剪貼簿釘選";
 "Preferences..." = "偏好設定⋯";
 "Check for Updates..." = "檢查更新⋯";
 "Quit macshot" = "結束 macshot";
@@ -190,6 +191,7 @@
 "Show snap alignment guides" = "顯示對齊輔助線";
 "Capture mouse cursor in screenshot" = "在螢幕截圖中擷取滑鼠游標";
 "Double-click selection to copy" = "雙擊選取範圍以複製";
+"Hide capture instructions" = "隱藏截圖操作提示";
 "Use window title in saved filename" = "在儲存的檔案名稱中使用視窗標題";
 "Hide menu bar icon" = "隱藏選單列圖像";
 "Hotkeys still work. To show the icon again, re-launch macshot." = "快捷鍵仍可使用。若要再次顯示圖像，請重新啟動 macshot。";
@@ -321,7 +323,9 @@
 
 /* Alerts */
 "No Image on Clipboard" = "剪貼簿中沒有影像";
+"No Image or Text on Clipboard" = "剪貼簿中沒有影像或文字";
 "Copy an image to the clipboard first, then try again." = "請先將影像拷貝到剪貼簿，然後再試一次。";
+"Copy an image or text to the clipboard first, then try again." = "請先將影像或文字拷貝到剪貼簿，然後再試一次。";
 "OK" = "好";
 "Accessibility Access Required" = "需要輔助使用權限";
 "macshot needs Accessibility permission to auto-scroll other apps. Please grant access in System Settings, then try again." = "macshot 需要「輔助使用」權限才能自動捲動其他 App。請在系統設定中授予權限，然後再試一次。";

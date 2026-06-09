@@ -30,6 +30,7 @@
 "Show History Panel" = "Tunjuk Panel Sejarah";
 "Open Image..." = "Buka Imej...";
 "Open from Clipboard" = "Buka dari Papan Keratan";
+"Pin from Clipboard" = "Semat dari Papan Keratan";
 "Preferences..." = "Keutamaan...";
 "Check for Updates..." = "Semak Kemas Kini...";
 "Quit macshot" = "Keluar macshot";
@@ -190,6 +191,7 @@
 "Show snap alignment guides" = "Tunjuk panduan penjajaran lekat";
 "Capture mouse cursor in screenshot" = "Tangkap kursor tetikus dalam tangkapan skrin";
 "Double-click selection to copy" = "Dwiklik pilihan untuk menyalin";
+"Hide capture instructions" = "Sembunyikan arahan tangkapan skrin";
 "Use window title in saved filename" = "Guna tajuk tetingkap dalam nama fail yang disimpan";
 "Hide menu bar icon" = "Sembunyikan ikon bar menu";
 "Hotkeys still work. To show the icon again, re-launch macshot." = "Kekunci panas masih berfungsi. Untuk menunjukkan ikon semula, lancar semula macshot.";
@@ -321,7 +323,9 @@
 
 /* Alerts */
 "No Image on Clipboard" = "Tiada Imej pada Papan Keratan";
+"No Image or Text on Clipboard" = "Tiada Imej atau Teks pada Papan Keratan";
 "Copy an image to the clipboard first, then try again." = "Salin imej ke papan keratan dahulu, kemudian cuba lagi.";
+"Copy an image or text to the clipboard first, then try again." = "Salin imej atau teks ke papan keratan dahulu, kemudian cuba lagi.";
 "OK" = "OK";
 "Accessibility Access Required" = "Akses Kebolehcapaian Diperlukan";
 "macshot needs Accessibility permission to auto-scroll other apps. Please grant access in System Settings, then try again." = "macshot memerlukan kebenaran Kebolehcapaian untuk auto-tatal aplikasi lain. Sila berikan akses dalam Tetapan Sistem, kemudian cuba lagi.";

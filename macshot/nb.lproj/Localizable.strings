@@ -30,6 +30,7 @@
 "Show History Panel" = "Vis historikkpanel";
 "Open Image..." = "\U00C5pne bilde\U2026";
 "Open from Clipboard" = "\U00C5pne fra utklippstavlen";
+"Pin from Clipboard" = "Fest fra utklippstavlen";
 "Preferences..." = "Innstillinger\U2026";
 "Check for Updates..." = "Se etter oppdateringer\U2026";
 "Quit macshot" = "Avslutt macshot";
@@ -190,6 +191,7 @@
 "Show snap alignment guides" = "Vis hjelpelinje for justering";
 "Capture mouse cursor in screenshot" = "Ta med musepeker i skjermbilde";
 "Double-click selection to copy" = "Dobbeltklikk p\U00E5 utvalget for \U00E5 kopiere";
+"Hide capture instructions" = "Skjul instruksjoner ved skjermbilde";
 "Use window title in saved filename" = "Bruk vindustittel i lagret filnavn";
 "Hide menu bar icon" = "Skjul menylinje-ikon";
 "Hotkeys still work. To show the icon again, re-launch macshot." = "Hurtigtastene fungerer fortsatt. For \U00E5 vise ikonet igjen, start macshot p\U00E5 nytt.";
@@ -321,7 +323,9 @@
 
 /* Alerts */
 "No Image on Clipboard" = "Ingen bilde p\U00E5 utklippstavlen";
+"No Image or Text on Clipboard" = "Ingen bilde eller tekst p\U00E5 utklippstavlen";
 "Copy an image to the clipboard first, then try again." = "Kopier et bilde til utklippstavlen f\U00F8rst, og pr\U00F8v igjen.";
+"Copy an image or text to the clipboard first, then try again." = "Kopier et bilde eller tekst til utklippstavlen f\U00F8rst, og pr\U00F8v igjen.";
 "OK" = "OK";
 "Accessibility Access Required" = "Tilgjengelighetstilgang p\U00E5krevd";
 "macshot needs Accessibility permission to auto-scroll other apps. Please grant access in System Settings, then try again." = "macshot trenger tilgjengelighetstillatelse for \U00E5 autorulling i andre apper. Gi tilgang i Systeminnstillinger, og pr\U00F8v igjen.";
