@@ -43,8 +43,10 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
     private var recordingSlot: HotkeyManager.HotkeySlot?
     private var toolShortcutFields: [ToolShortcutManager.Action: NSTextField] = [:]
     private var toolShortcutButtons: [ToolShortcutManager.Action: NSButton] = [:]
+    private var showToolShortcutsInTooltipsCheckbox: NSButton!
     private var recordingToolAction: ToolShortcutManager.Action?
     private var savePathField: NSTextField!
+    private var saveActionPopup: NSPopUpButton!
     private var ocrActionPopup: NSPopUpButton!
     private var copySoundCheckbox: NSButton!
     // rememberSelectionCheckbox removed — selection is always saved for "Capture Last Area"
@@ -58,12 +60,23 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
     private var thumbnailScaleLabel: NSTextField!
     private var launchAtLoginCheckbox: NSButton!
     private var hideMenuBarIconCheckbox: NSButton!
+    private var menuBarIconModePopup: NSPopUpButton!
+    private var menuBarIconPresetPopup: NSPopUpButton!
+    private var menuBarIconSymbolField: NSTextField!
+
+    /// Curated SF Symbol quick-picks for the menu bar icon. Free text is still allowed.
+    private static let menuBarIconPresetSymbols = [
+        "camera.viewfinder", "camera", "camera.fill", "camera.aperture",
+        "viewfinder", "crop", "crop.rotate", "scissors",
+        "rectangle.dashed", "square.dashed", "photo", "record.circle",
+    ]
     private var historySizeField: NSTextField!
     private var historySizeStepper: NSStepper!
     private var snapGuidesCheckbox: NSButton!
     private var captureCursorCheckbox: NSButton!
     private var doubleClickToCopyCheckbox: NSButton!
     private var hideCaptureInstructionsCheckbox: NSButton!
+    private var disableSelectionShadowCheckbox: NSButton!
     private var liquidGlassCheckbox: NSButton!
     private var filenameTemplateField: NSTextField!
     private var filenameTemplatePreview: NSTextField!
@@ -408,6 +421,45 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         hideNote.font = NSFont.systemFont(ofSize: 10)
         hideNote.textColor = .secondaryLabelColor
         stack.addArrangedSubview(indented(hideNote))
+        stack.setCustomSpacing(10, after: stack.arrangedSubviews.last!)
+
+        // Menu bar icon: keep the bundled icon or pick any SF Symbol.
+        menuBarIconModePopup = NSPopUpButton()
+        menuBarIconModePopup.addItem(withTitle: L("Default"))
+        menuBarIconModePopup.addItem(withTitle: L("Custom symbol"))
+        menuBarIconModePopup.target = self
+        menuBarIconModePopup.action = #selector(menuBarIconModeChanged(_:))
+        stack.addArrangedSubview(labeledRow(L("Menu bar icon:"), controls: [menuBarIconModePopup]))
+        stack.setCustomSpacing(6, after: stack.arrangedSubviews.last!)
+
+        menuBarIconSymbolField = NSTextField()
+        menuBarIconSymbolField.placeholderString = "camera.viewfinder"
+        menuBarIconSymbolField.translatesAutoresizingMaskIntoConstraints = false
+        menuBarIconSymbolField.widthAnchor.constraint(equalToConstant: 180).isActive = true
+        menuBarIconSymbolField.target = self
+        menuBarIconSymbolField.action = #selector(menuBarIconSymbolChanged(_:))
+        menuBarIconSymbolField.delegate = self
+
+        // Pull-down quick-picker: index 0 is the "Presets" label, symbols follow.
+        menuBarIconPresetPopup = NSPopUpButton(frame: .zero, pullsDown: true)
+        menuBarIconPresetPopup.addItem(withTitle: L("Presets"))
+        for symbol in Self.menuBarIconPresetSymbols {
+            menuBarIconPresetPopup.addItem(withTitle: symbol)
+        }
+        menuBarIconPresetPopup.target = self
+        menuBarIconPresetPopup.action = #selector(menuBarIconPresetChanged(_:))
+
+        let iconSymbolRow = NSStackView(views: [menuBarIconSymbolField, menuBarIconPresetPopup])
+        iconSymbolRow.orientation = .horizontal
+        iconSymbolRow.spacing = 8
+        iconSymbolRow.alignment = .centerY
+        stack.addArrangedSubview(indented(iconSymbolRow))
+        stack.setCustomSpacing(4, after: stack.arrangedSubviews.last!)
+
+        let iconNote = NSTextField(wrappingLabelWithString: L("Enter any SF Symbol name (e.g. camera.fill) or pick a preset. Browse names in Apple's SF Symbols app. Invalid names fall back to the default icon."))
+        iconNote.font = NSFont.systemFont(ofSize: 10)
+        iconNote.textColor = .secondaryLabelColor
+        stack.addArrangedSubview(indented(iconNote))
         stack.setCustomSpacing(6, after: stack.arrangedSubviews.last!)
 
         let urlSchemeCheckbox = NSButton(checkboxWithTitle: L("Enable macshot:// URL scheme"), target: self, action: #selector(urlSchemeChanged(_:)))
@@ -525,7 +577,7 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         stack.addArrangedSubview(indented(quickCaptureOpenEditorCheckbox))
         stack.setCustomSpacing(8, after: stack.arrangedSubviews.last!)
 
-        // OCR action dropdown
+        // OCR & QR action dropdown
         ocrActionPopup = NSPopUpButton()
         ocrActionPopup.addItems(withTitles: [
             L("Show window + copy to clipboard"),
@@ -535,7 +587,7 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         ocrActionPopup.target = self
         ocrActionPopup.action = #selector(ocrActionChanged(_:))
 
-        stack.addArrangedSubview(labeledRow(L("OCR Capture:"), controls: [ocrActionPopup]))
+        stack.addArrangedSubview(labeledRow(L("OCR & QR Capture:"), controls: [ocrActionPopup]))
         stack.setCustomSpacing(12, after: stack.arrangedSubviews.last!)
 
         // Checkboxes
@@ -546,6 +598,7 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         captureCursorCheckbox = NSButton(checkboxWithTitle: L("Capture mouse cursor in screenshot"), target: self, action: #selector(captureCursorChanged(_:)))
         doubleClickToCopyCheckbox = NSButton(checkboxWithTitle: L("Double-click selection to copy"), target: self, action: #selector(doubleClickToCopyChanged(_:)))
         hideCaptureInstructionsCheckbox = NSButton(checkboxWithTitle: L("Hide capture instructions"), target: self, action: #selector(hideCaptureInstructionsChanged(_:)))
+        disableSelectionShadowCheckbox = NSButton(checkboxWithTitle: L("Disable shadow outside selection"), target: self, action: #selector(disableSelectionShadowChanged(_:)))
         filenameTemplateField = NSTextField()
         filenameTemplateField.placeholderString = FilenameFormatter.defaultTemplate
         filenameTemplateField.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
@@ -622,11 +675,26 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         stack.setCustomSpacing(6, after: stack.arrangedSubviews.last!)
 
         stack.addArrangedSubview(indented(hideCaptureInstructionsCheckbox))
+        stack.setCustomSpacing(6, after: stack.arrangedSubviews.last!)
+
+        stack.addArrangedSubview(indented(disableSelectionShadowCheckbox))
         stack.setCustomSpacing(20, after: stack.arrangedSubviews.last!)
 
         // ── Output ───────────────────────────────────────────
         stack.addArrangedSubview(sectionHeader(L("Output")))
         stack.setCustomSpacing(10, after: stack.arrangedSubviews.last!)
+
+        // Default save action
+        saveActionPopup = NSPopUpButton()
+        for action in SaveActionPreference.allCases {
+            saveActionPopup.addItem(withTitle: action.title)
+            saveActionPopup.lastItem?.representedObject = action.rawValue
+        }
+        saveActionPopup.target = self
+        saveActionPopup.action = #selector(saveActionChanged(_:))
+
+        stack.addArrangedSubview(labeledRow(L("Save action:"), controls: [saveActionPopup]))
+        stack.setCustomSpacing(8, after: stack.arrangedSubviews.last!)
 
         // Save folder
         savePathField = NSTextField()
@@ -661,14 +729,17 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
 
         // Image format
         imageFormatPopup = NSPopUpButton()
-        imageFormatPopup.addItems(withTitles: ["PNG", "JPEG", "HEIC", "WebP"])
+        for format in ImageEncoder.availableFormats {
+            imageFormatPopup.addItem(withTitle: format.displayName)
+            imageFormatPopup.lastItem?.representedObject = format.rawValue
+        }
         imageFormatPopup.target = self
         imageFormatPopup.action = #selector(imageFormatChanged(_:))
 
         stack.addArrangedSubview(labeledRow(L("Image format:"), controls: [imageFormatPopup]))
         stack.setCustomSpacing(8, after: stack.arrangedSubviews.last!)
 
-        // Quality (applies to JPEG and HEIC)
+        // Quality (applies to lossy formats: JPEG, HEIC, WebP, AVIF)
         qualitySlider = NSSlider()
         qualitySlider.minValue = 10
         qualitySlider.maxValue = 100
@@ -975,6 +1046,13 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         stack.addArrangedSubview(sectionHeader(L("Overlay / Editor Shortcuts")))
         stack.setCustomSpacing(10, after: stack.arrangedSubviews.last!)
 
+        showToolShortcutsInTooltipsCheckbox = NSButton(
+            checkboxWithTitle: L("Show shortcuts in tooltips"),
+            target: self,
+            action: #selector(showToolShortcutsInTooltipsChanged(_:)))
+        stack.addArrangedSubview(indented(showToolShortcutsInTooltipsCheckbox))
+        stack.setCustomSpacing(12, after: stack.arrangedSubviews.last!)
+
         for action in ToolShortcutManager.Action.allCases {
             let field = NSTextField()
             field.isEditable = false
@@ -1156,6 +1234,10 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         toolShortcutFields[action]?.stringValue = ToolShortcutManager.displayString(for: action)
     }
 
+    @objc private func showToolShortcutsInTooltipsChanged(_ sender: NSButton) {
+        UserDefaults.standard.set(sender.state == .on, forKey: "showToolShortcutsInTooltips")
+    }
+
     private func stopToolShortcutRecording() {
         if let action = recordingToolAction {
             toolShortcutFields[action]?.stringValue = ToolShortcutManager.displayString(for: action)
@@ -1241,7 +1323,7 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
 
         let rightActionItems: [(tag: Int, label: String)] = [
             (1001, L("Upload")), (1002, L("Pin (floating window)")),
-            (1003, L("OCR (extract text)")), (1006, L("Auto-Redact sensitive data")),
+            (1003, L("OCR & QR")), (1006, L("Auto-Redact sensitive data")),
             (1008, L("Translate")),
             (1009, L("Record screen")),
             (1010, L("Scroll Capture")),
@@ -2098,6 +2180,7 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         }
 
         savePathField.stringValue = SaveDirectoryAccess.displayPath
+        selectSaveAction(SaveActionPreference.current)
 
         // Migrate legacy bool to new int setting
         if UserDefaults.standard.object(forKey: "ocrAction") == nil {
@@ -2139,12 +2222,19 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
 
         hideMenuBarIconCheckbox.state = UserDefaults.standard.bool(forKey: "hideMenuBarIcon") ? .on : .off
 
+        let iconMode = UserDefaults.standard.string(forKey: AppDelegate.statusBarIconModeKey) ?? "default"
+        menuBarIconModePopup.selectItem(at: iconMode == "symbol" ? 1 : 0)
+        menuBarIconSymbolField.stringValue = UserDefaults.standard.string(forKey: AppDelegate.statusBarIconSymbolNameKey) ?? ""
+        updateMenuBarIconControlsEnabled()
+
         let snapGuides = UserDefaults.standard.object(forKey: "snapGuidesEnabled") as? Bool ?? true
         snapGuidesCheckbox.state = snapGuides ? .on : .off
+        showToolShortcutsInTooltipsCheckbox.state = UserDefaults.standard.bool(forKey: "showToolShortcutsInTooltips") ? .on : .off
 
         captureCursorCheckbox.state = UserDefaults.standard.bool(forKey: "captureCursor") ? .on : .off
         doubleClickToCopyCheckbox.state = (UserDefaults.standard.object(forKey: "doubleClickToCopy") as? Bool ?? true) ? .on : .off
         hideCaptureInstructionsCheckbox.state = UserDefaults.standard.bool(forKey: "hideCaptureInstructions") ? .on : .off
+        disableSelectionShadowCheckbox.state = UserDefaults.standard.bool(forKey: "disableSelectionOutsideShadow") ? .on : .off
         filenameTemplateField.stringValue = UserDefaults.standard.string(forKey: FilenameFormatter.userDefaultsKey) ?? FilenameFormatter.defaultTemplate
         updateFilenamePreview()
         recordingFilenameTemplateField.stringValue = UserDefaults.standard.string(forKey: FilenameFormatter.recordingUserDefaultsKey) ?? FilenameFormatter.defaultRecordingTemplate
@@ -2179,13 +2269,7 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         quickModePopup.selectItem(at: quickMode)
         quickCaptureOpenEditorCheckbox.state = UserDefaults.standard.bool(forKey: "quickCaptureOpenEditor") ? .on : .off
 
-        let format = ImageEncoder.format
-        switch format {
-        case .png:  imageFormatPopup.selectItem(at: 0)
-        case .jpeg: imageFormatPopup.selectItem(at: 1)
-        case .heic: imageFormatPopup.selectItem(at: 2)
-        case .webp: imageFormatPopup.selectItem(at: 3)
-        }
+        selectImageFormat(ImageEncoder.format)
 
         let quality = Int(ImageEncoder.quality * 100)
         qualitySlider.integerValue = quality
@@ -2246,10 +2330,31 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
     }
 
     private func updateQualityVisibility() {
-        let hasQuality = imageFormatPopup.indexOfSelectedItem >= 1  // JPEG or HEIC
+        let raw = imageFormatPopup.selectedItem?.representedObject as? String
+        let hasQuality = raw.flatMap(ImageEncoder.Format.init(rawValue:))?.hasQuality ?? false
         qualitySlider.isEnabled = hasQuality
         qualityLabel.textColor = hasQuality ? .labelColor : .tertiaryLabelColor
         qualityRowLabel.textColor = hasQuality ? .labelColor : .tertiaryLabelColor
+    }
+
+    private func selectImageFormat(_ format: ImageEncoder.Format) {
+        for item in imageFormatPopup.itemArray {
+            if item.representedObject as? String == format.rawValue {
+                imageFormatPopup.select(item)
+                return
+            }
+        }
+        imageFormatPopup.selectItem(at: 0)
+    }
+
+    private func selectSaveAction(_ action: SaveActionPreference) {
+        for item in saveActionPopup.itemArray {
+            if item.representedObject as? Int == action.rawValue {
+                saveActionPopup.select(item)
+                return
+            }
+        }
+        saveActionPopup.selectItem(at: 0)
     }
 
     // MARK: - Actions
@@ -2270,11 +2375,20 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
     @objc private func ocrActionChanged(_ sender: NSPopUpButton) {
         UserDefaults.standard.set(sender.indexOfSelectedItem, forKey: "ocrAction")
     }
+    @objc private func saveActionChanged(_ sender: NSPopUpButton) {
+        guard let raw = sender.selectedItem?.representedObject as? Int,
+              let action = SaveActionPreference(rawValue: raw) else { return }
+        SaveActionPreference.current = action
+    }
     @objc private func copySoundChanged(_ sender: NSButton) {
         UserDefaults.standard.set(sender.state == .on, forKey: "playCopySound")
     }
     @objc private func rememberToolChanged(_ sender: NSButton) {
-        UserDefaults.standard.set(sender.state == .on, forKey: "rememberLastTool")
+        let enabled = sender.state == .on
+        UserDefaults.standard.set(enabled, forKey: "rememberLastTool")
+        if !enabled {
+            OverlayView.resetRememberedTool()
+        }
     }
     @objc private func thumbnailChanged(_ sender: NSButton) {
         UserDefaults.standard.set(sender.state == .on, forKey: "showFloatingThumbnail")
@@ -2315,8 +2429,11 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         if let url = URL(string: "https://github.com/sw33tLie/macshot") { NSWorkspace.shared.open(url) }
     }
     @objc private func imageFormatChanged(_ sender: NSPopUpButton) {
-        let formats = ["png", "jpeg", "heic", "webp"]
-        UserDefaults.standard.set(formats[sender.indexOfSelectedItem], forKey: "imageFormat")
+        guard let raw = sender.selectedItem?.representedObject as? String,
+              let format = ImageEncoder.Format(rawValue: raw),
+              ImageEncoder.isFormatAvailable(format)
+        else { return }
+        UserDefaults.standard.set(raw, forKey: "imageFormat")
         updateQualityVisibility()
     }
     @objc private func qualityChanged(_ sender: NSSlider) {
@@ -2416,8 +2533,7 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         let key = sender.identifier?.rawValue ?? "enabledTools"
         let allTools: [AnnotationTool] = [.pencil, .line, .arrow, .rectangle,
                                           .ellipse, .marker, .text, .number, .pixelate, .loupe, .stamp, .measure]
-        let allActions: [Int] = [1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010]
-        let defaultValues: [Int] = key == "enabledTools" ? allTools.map { $0.rawValue } : allActions
+        let defaultValues: [Int] = key == "enabledTools" ? allTools.map { $0.rawValue } : ToolbarLayout.allKnownActionTags
         var enabled = UserDefaults.standard.array(forKey: key) as? [Int] ?? defaultValues
         if sender.state == .on { if !enabled.contains(sender.tag) { enabled.append(sender.tag) } }
         else { enabled.removeAll { $0 == sender.tag } }
@@ -2559,6 +2675,9 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
     @objc private func hideCaptureInstructionsChanged(_ sender: NSButton) {
         UserDefaults.standard.set(sender.state == .on, forKey: "hideCaptureInstructions")
     }
+    @objc private func disableSelectionShadowChanged(_ sender: NSButton) {
+        UserDefaults.standard.set(sender.state == .on, forKey: "disableSelectionOutsideShadow")
+    }
     @objc private func filenameTemplateCommitted(_ sender: NSTextField) {
         let trimmed = sender.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let value = trimmed.isEmpty ? FilenameFormatter.defaultTemplate : sender.stringValue
@@ -2648,7 +2767,7 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
             ("macshot://capture-fullscreen",  L("Capture the full screen")),
             ("macshot://capture-last",        L("Re-capture the last selected area")),
             ("macshot://quick-capture",       L("Quick capture (uses your Enter action)")),
-            ("macshot://ocr",                 L("Capture area and extract text")),
+            ("macshot://ocr",                 L("Capture area and read text/QR codes")),
             ("macshot://record",              L("Start area recording")),
             ("macshot://record-fullscreen",   L("Start full-screen recording")),
             ("macshot://stop-recording",      L("Stop the current recording")),
@@ -2734,6 +2853,42 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         (NSApp.delegate as? AppDelegate)?.setMenuBarIconVisible(!hidden)
     }
 
+    @objc private func menuBarIconModeChanged(_ sender: NSPopUpButton) {
+        let mode = sender.indexOfSelectedItem == 1 ? "symbol" : "default"
+        UserDefaults.standard.set(mode, forKey: AppDelegate.statusBarIconModeKey)
+        updateMenuBarIconControlsEnabled()
+        (NSApp.delegate as? AppDelegate)?.refreshStatusBarIcon()
+    }
+
+    @objc private func menuBarIconPresetChanged(_ sender: NSPopUpButton) {
+        // Pull-down: index 0 is the "Presets" label; real symbols start at 1.
+        guard sender.indexOfSelectedItem >= 1,
+              let symbol = sender.titleOfSelectedItem, !symbol.isEmpty else { return }
+        menuBarIconSymbolField.stringValue = symbol
+        applyMenuBarIconSymbol(symbol)
+    }
+
+    @objc private func menuBarIconSymbolChanged(_ sender: NSTextField) {
+        applyMenuBarIconSymbol(sender.stringValue)
+    }
+
+    private func applyMenuBarIconSymbol(_ rawName: String) {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if name.isEmpty {
+            UserDefaults.standard.removeObject(forKey: AppDelegate.statusBarIconSymbolNameKey)
+        } else {
+            UserDefaults.standard.set(name, forKey: AppDelegate.statusBarIconSymbolNameKey)
+        }
+        (NSApp.delegate as? AppDelegate)?.refreshStatusBarIcon()
+    }
+
+    /// Enables the symbol field + preset picker only in "Custom symbol" mode.
+    private func updateMenuBarIconControlsEnabled() {
+        let custom = menuBarIconModePopup.indexOfSelectedItem == 1
+        menuBarIconSymbolField.isEnabled = custom
+        menuBarIconPresetPopup.isEnabled = custom
+    }
+
     @objc private func autoUpdateChanged(_ sender: NSButton) {
         UserDefaults.standard.set(sender.state == .on, forKey: "SUEnableAutomaticChecks")
     }
@@ -2779,6 +2934,8 @@ extension SettingsWindowController: NSTextFieldDelegate {
         } else if field === recordingFilenameTemplateField {
             UserDefaults.standard.set(field.stringValue, forKey: FilenameFormatter.recordingUserDefaultsKey)
             updateRecordingFilenamePreview()
+        } else if field === menuBarIconSymbolField {
+            applyMenuBarIconSymbol(field.stringValue)
         }
     }
 

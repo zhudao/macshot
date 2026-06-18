@@ -85,6 +85,9 @@ class ToolbarLayout {
     }
     static var handleColor: NSColor { accentColor }
     static let cornerRadius: CGFloat = 6
+    static let allKnownActionTags: [Int] = [
+        1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013,
+    ]
 
     /// Save accent color to UserDefaults.
     static func saveAccentColor(_ color: NSColor) {
@@ -325,9 +328,6 @@ class ToolbarLayout {
             return buttons
         }
 
-        let allKnownActionTags: [Int] = [
-            1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013,
-        ]
         // Migrate: only add action tags that are brand-new (never seen before).
         // knownActionTags tracks which tags have been introduced so user-disabled tags are
         // never silently re-enabled when future versions add new action tags.
@@ -368,10 +368,17 @@ class ToolbarLayout {
         // Copy and save are always present
         buttons.append(
             ToolbarButton(action: .copy, sfSymbol: "doc.on.doc", tooltip: L("Copy")))
+        let saveTooltip: String = {
+            switch SaveActionPreference.current {
+            case .saveToFolder:
+                return "\(L("Save to")) \(URL(fileURLWithPath: SaveDirectoryAccess.displayPath).lastPathComponent)"
+            case .askWhereToSave:
+                return L("Ask where to save")
+            }
+        }()
         var saveBtn = ToolbarButton(
             action: .save, sfSymbol: "square.and.arrow.down.fill",
-            tooltip:
-                "\(L("Save to")) \(URL(fileURLWithPath: SaveDirectoryAccess.displayPath).lastPathComponent)"
+            tooltip: saveTooltip
         )
         saveBtn.hasContextMenu = true
         buttons.append(saveBtn)
@@ -397,11 +404,11 @@ class ToolbarLayout {
                 ToolbarButton(action: .pin, sfSymbol: "pin.fill", tooltip: L("Pin")))
         }
 
-        // OCR (tag 1003)
+        // OCR & QR (tag 1003)
         if actionEnabled(1003) {
             buttons.append(
                 ToolbarButton(
-                    action: .ocr, sfSymbol: "doc.text.viewfinder", tooltip: L("OCR Text")))
+                    action: .ocr, sfSymbol: "doc.text.viewfinder", tooltip: L("OCR & QR")))
         }
 
         // Translate (tag 1008)

@@ -7,6 +7,8 @@ enum PopoverHelper {
 
     private static var activePopover: NSPopover?
     private static var anchorView: NSView?
+    private static var localMouseDownMonitor: Any?
+    private static var globalMouseDownMonitor: Any?
 
     /// Show a popover with the given content view, anchored relative to a rect in the given parent view.
     static func show(_ contentView: NSView, size: NSSize, relativeTo rect: NSRect, of view: NSView, preferredEdge: NSRectEdge = .minY) {
@@ -21,16 +23,11 @@ enum PopoverHelper {
         let vc = NSViewController()
         vc.view = cursorWrapped(contentView)
         popover.contentViewController = vc
+        popover.delegate = AnchorCleanupDelegate.shared
         popover.show(relativeTo: rect, of: view, preferredEdge: preferredEdge)
-
-        // Ensure popover appears above high-level overlay windows
-        if let popoverWindow = popover.contentViewController?.view.window {
-            let parentLevel = view.window?.level ?? .normal
-            if parentLevel.rawValue > NSWindow.Level.normal.rawValue {
-                popoverWindow.level = NSWindow.Level(parentLevel.rawValue + 1)
-            }
-        }
+        configureShownPopover(popover, parentWindow: view.window)
         activePopover = popover
+        installOutsideClickMonitors()
     }
 
     /// Show a popover anchored to a specific point in a view (for overlay mode where buttons aren't real views).
@@ -54,22 +51,29 @@ enum PopoverHelper {
         popover.contentViewController = vc
         popover.delegate = AnchorCleanupDelegate.shared
         popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: preferredEdge)
-
-        // Ensure popover appears above high-level overlay windows
-        if let popoverWindow = popover.contentViewController?.view.window {
-            let parentLevel = parentView.window?.level ?? .normal
-            if parentLevel.rawValue > NSWindow.Level.normal.rawValue {
-                popoverWindow.level = NSWindow.Level(parentLevel.rawValue + 1)
-            }
-        }
+        configureShownPopover(popover, parentWindow: parentView.window)
         activePopover = popover
+        installOutsideClickMonitors()
     }
 
+    /// Time the most recent popover was dismissed — used to implement
+    /// click-the-anchor-to-toggle-closed (the outside click auto-dismisses a
+    /// semitransient popover before the button handler runs, so the handler
+    /// checks "was one just dismissed?" instead of "is one visible?").
+    private(set) static var lastDismissedAt: Date = .distantPast
+
     static func dismiss() {
+        if activePopover?.isShown == true { lastDismissedAt = Date() }
         activePopover?.close()
         activePopover = nil
+        removeOutsideClickMonitors()
         anchorView?.removeFromSuperview()
         anchorView = nil
+    }
+
+    /// True if a popover was dismissed within the last `seconds` (default 0.25s).
+    static func wasRecentlyDismissed(within seconds: TimeInterval = 0.25) -> Bool {
+        Date().timeIntervalSince(lastDismissedAt) < seconds
     }
 
     static var isVisible: Bool { activePopover?.isShown == true }
@@ -95,6 +99,71 @@ enum PopoverHelper {
             wrapper.addSubview(contentView)
         }
         return wrapper
+    }
+
+    /// Finish window-level setup after AppKit has created the private popover
+    /// window. Overlay popovers may be opened from non-key Liquid Glass chrome
+    /// panels while macshot itself remains inactive; without an explicit key
+    /// handoff, AppKit leaves the popover visible but the first click only
+    /// focuses it. Making the popover window key preserves the non-activating
+    /// overlay/chrome topology and keeps semitransient dismissal unchanged.
+    private static func configureShownPopover(_ popover: NSPopover, parentWindow: NSWindow?) {
+        func configure() {
+            guard popover.isShown,
+                  let popoverWindow = popover.contentViewController?.view.window else { return }
+
+            let parentLevel = parentWindow?.level ?? .normal
+            if parentLevel.rawValue > NSWindow.Level.normal.rawValue {
+                popoverWindow.level = NSWindow.Level(parentLevel.rawValue + 1)
+            }
+
+            if let parentWindow {
+                popoverWindow.collectionBehavior.formUnion(
+                    parentWindow.collectionBehavior.intersection([.canJoinAllSpaces, .fullScreenAuxiliary]))
+            }
+
+            popoverWindow.makeKey()
+        }
+
+        configure()
+        DispatchQueue.main.async {
+            configure()
+        }
+    }
+
+    private static func installOutsideClickMonitors() {
+        removeOutsideClickMonitors()
+        let mask: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        localMouseDownMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { event in
+            if shouldDismiss(forMouseDownAt: NSEvent.mouseLocation) {
+                dismiss()
+            }
+            return event
+        }
+        globalMouseDownMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { _ in
+            DispatchQueue.main.async {
+                if shouldDismiss(forMouseDownAt: NSEvent.mouseLocation) {
+                    dismiss()
+                }
+            }
+        }
+    }
+
+    private static func removeOutsideClickMonitors() {
+        if let localMouseDownMonitor {
+            NSEvent.removeMonitor(localMouseDownMonitor)
+            self.localMouseDownMonitor = nil
+        }
+        if let globalMouseDownMonitor {
+            NSEvent.removeMonitor(globalMouseDownMonitor)
+            self.globalMouseDownMonitor = nil
+        }
+    }
+
+    private static func shouldDismiss(forMouseDownAt screenPoint: NSPoint) -> Bool {
+        guard let popover = activePopover, popover.isShown else { return false }
+        guard let popoverWindow = popover.contentViewController?.view.window else { return true }
+        return !popoverWindow.frame.contains(screenPoint)
     }
 }
 

@@ -32,11 +32,14 @@ class DetachedEditorWindowController: NSObject, NSWindowDelegate {
     private var historyEntryID: String?
     /// Snapshot of undo stack depth when last saved, to detect changes.
     private var lastSavedUndoDepth: Int = 0
+    /// Snapshot of serialized editable state when last saved, to catch object mutations like drag moves.
+    private var lastSavedStateSignature: String = ""
     /// True if the image has never been output (copied, saved, etc.) — closing would lose the capture.
     /// Set to false on first output action. Editors opened from files start false.
     private var screenshotNeverOutput: Bool = true
     /// When true, force beautify off on open (image already has beautify baked in).
     private var disableBeautifyOnOpen: Bool = false
+    private var initialEditState: CaptureEditState?
 
     /// Open an editor window with the given image (typically from captureSelectedRegion).
     /// When `disableBeautify` is true, beautify starts off regardless of UserDefaults
@@ -49,10 +52,11 @@ class DetachedEditorWindowController: NSObject, NSWindowDelegate {
     /// here: writing `view.currentTool = .arrow` triggers the didSet that
     /// persists "arrow" globally, wiping the user's last-tool memory across
     /// the whole app.
-    static func open(image: NSImage, tool: AnnotationTool? = nil, color: NSColor? = nil, strokeWidth: CGFloat? = nil, annotations: [Annotation] = [], historyEntryID: String? = nil, fromCapture: Bool = false, disableBeautify: Bool = false) {
+    static func open(image: NSImage, tool: AnnotationTool? = nil, color: NSColor? = nil, strokeWidth: CGFloat? = nil, annotations: [Annotation] = [], historyEntryID: String? = nil, fromCapture: Bool = false, disableBeautify: Bool = false, editState: CaptureEditState? = nil) {
         let controller = DetachedEditorWindowController()
         controller.historyEntryID = historyEntryID
         controller.disableBeautifyOnOpen = disableBeautify
+        controller.initialEditState = editState
         // Only warn about unsaved capture if the image came from a live capture (not a file on disk)
         controller.screenshotNeverOutput = fromCapture && historyEntryID == nil
         controller.show(image: image, tool: tool, color: color, strokeWidth: strokeWidth, annotations: annotations)
@@ -178,9 +182,13 @@ class DetachedEditorWindowController: NSObject, NSWindowDelegate {
 
         view.applySelection(NSRect(origin: .zero, size: imgSize))
         if !annotations.isEmpty { view.setAnnotations(annotations) }
+        if let editState = initialEditState {
+            view.applyCaptureEditState(editState)
+        }
 
         // Snapshot undo depth as the "clean" state for unsaved changes detection
         lastSavedUndoDepth = view.undoStack.count
+        lastSavedStateSignature = view.editableStateSignature()
 
         win.contentView = container
         win.makeKeyAndOrderFront(nil)
@@ -229,10 +237,12 @@ class DetachedEditorWindowController: NSObject, NSWindowDelegate {
         if historyEntryID != nil {
             // Linked to history — check if undo stack changed since last save
             hasChanges = view.undoStack.count != lastSavedUndoDepth
+                || view.editableStateSignature() != lastSavedStateSignature
         } else {
             // Not in history — warn if the image has never been saved/copied
             // (the capture would be lost entirely on close)
             hasChanges = view.undoStack.count > lastSavedUndoDepth
+                || view.editableStateSignature() != lastSavedStateSignature
                 || view.annotations.contains(where: { $0.isMovable })
                 || screenshotNeverOutput
         }
@@ -263,6 +273,7 @@ class DetachedEditorWindowController: NSObject, NSWindowDelegate {
                 self.historyEntryID = nil
                 self.screenshotNeverOutput = false
                 self.lastSavedUndoDepth = view.undoStack.count
+                self.lastSavedStateSignature = view.editableStateSignature()
                 sender.close()
             default:
                 break  // Cancel
@@ -285,46 +296,61 @@ class DetachedEditorWindowController: NSObject, NSWindowDelegate {
     }
 
     /// Save current editor state to the linked history entry (without closing).
-    private func saveToHistory() {
+    private func saveToHistory(annotationData: CaptureAnnotationData? = nil) {
         guard let entryID = historyEntryID, let view = overlayView else { return }
         guard let composited = view.captureSelectedRegion() else { return }
         let finalImage = applyPostProcessing(composited)
-        let annotations = view.annotations.filter { $0.isMovable }
-        let rawImage: NSImage? = annotations.isEmpty ? nil : view.captureSelectedRegionRaw()
+        let data = annotationData ?? currentAnnotationData()
         ScreenshotHistory.shared.updateEntry(
             id: entryID,
             compositedImage: finalImage,
-            rawImage: rawImage,
-            annotations: annotations.isEmpty ? nil : annotations)
+            rawImage: data?.rawImage,
+            annotations: data?.annotations,
+            editState: data?.editState)
         lastSavedUndoDepth = view.undoStack.count
+        lastSavedStateSignature = view.editableStateSignature()
         // Update floating thumbnail if it's still visible
-        (NSApp.delegate as? AppDelegate)?.refreshThumbnail(for: entryID, image: finalImage)
+        (NSApp.delegate as? AppDelegate)?.refreshThumbnail(for: entryID, image: finalImage, annotationData: data)
     }
 
     /// Commit current editor state back to the history entry, then close.
     private func commitToHistory() {
         // Capture the final image before close tears down the view
         let finalImage: NSImage?
+        let annotationData = currentAnnotationData()
         if let view = overlayView, let composited = view.captureSelectedRegion() {
             finalImage = applyPostProcessing(composited)
         } else {
             finalImage = nil
         }
-        saveToHistory()
+        saveToHistory(annotationData: annotationData)
         window?.close()
         // Show a new floating thumbnail with the saved image
         if let image = finalImage, let entryID = historyEntryID {
-            (NSApp.delegate as? AppDelegate)?.showFloatingThumbnail(image: image, historyEntryID: entryID)
+            (NSApp.delegate as? AppDelegate)?.showFloatingThumbnail(image: image, annotationData: annotationData, historyEntryID: entryID)
         }
     }
 
     /// Called by output actions (copy, save, etc.) to persist changes to history.
-    private func autoSaveToHistoryIfNeeded(compositedImage: NSImage) {
+    private func autoSaveToHistoryIfNeeded(compositedImage: NSImage, annotationData: CaptureAnnotationData? = nil) {
         screenshotNeverOutput = false
-        ensureInHistory(compositedImage: compositedImage)
+        ensureInHistory(compositedImage: compositedImage, annotationData: annotationData)
         if historyEntryID != nil {
-            saveToHistory()
+            saveToHistory(annotationData: annotationData)
         }
+    }
+
+    private func currentAnnotationData() -> CaptureAnnotationData? {
+        guard let view = overlayView else { return nil }
+        let annotations = view.annotations.filter { $0.isMovable }
+        let editState = view.captureEditState()
+        guard !annotations.isEmpty || editState.hasPostProcessing,
+              let rawImage = view.captureSelectedRegionRaw() else { return nil }
+        return CaptureAnnotationData(
+            rawImage: rawImage,
+            annotations: annotations,
+            editState: editState.hasPostProcessing ? editState : nil
+        )
     }
 
     /// Apply image effects and beautify to the captured image.
@@ -353,32 +379,31 @@ extension DetachedEditorWindowController: OverlayViewDelegate {
     func overlayViewDidConfirm() {
         guard let raw = overlayView?.captureSelectedRegion() else { return }
         let image = applyPostProcessing(raw)
+        let annotationData = currentAnnotationData()
         ImageEncoder.copyToClipboard(image)
         playCopySound()
-        (NSApp.delegate as? AppDelegate)?.showFloatingThumbnail(image: image)
-        autoSaveToHistoryIfNeeded(compositedImage: image)
+        autoSaveToHistoryIfNeeded(compositedImage: image, annotationData: annotationData)
+        (NSApp.delegate as? AppDelegate)?.showFloatingThumbnail(image: image, annotationData: annotationData, historyEntryID: historyEntryID)
     }
 
     func overlayViewDidRequestSave() {
+        switch SaveActionPreference.current {
+        case .saveToFolder:
+            overlayViewDidRequestFileSave()
+        case .askWhereToSave:
+            overlayViewDidRequestSaveAs()
+        }
+    }
+
+    func overlayViewDidRequestSaveAs() {
         guard let view = overlayView,
               let raw = view.captureSelectedRegion() else { return }
         let image = applyPostProcessing(raw)
-        guard let imageData = ImageEncoder.encode(image) else { return }
-        let savePanel = NSSavePanel()
-        savePanel.allowedContentTypes = [ImageEncoder.utType]
-        savePanel.nameFieldStringValue = FilenameFormatter.defaultImageFilename()
-        savePanel.directoryURL = SaveDirectoryAccess.directoryHint()
-        let handler: (NSApplication.ModalResponse) -> Void = { [weak self] response in
-            if response == .OK, let url = savePanel.url {
-                try? imageData.write(to: url)
+        ImageSaveService.showSavePanel(for: image, sheetWindow: window) { [weak self] success in
+            if success {
                 self?.playCopySound()
                 self?.autoSaveToHistoryIfNeeded(compositedImage: image)
             }
-        }
-        if let window {
-            savePanel.beginSheetModal(for: window, completionHandler: handler)
-        } else {
-            savePanel.begin(completionHandler: handler)
         }
     }
 
@@ -394,23 +419,21 @@ extension DetachedEditorWindowController: OverlayViewDelegate {
         guard let image = overlayView?.captureSelectedRegion(),
               let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
         DispatchQueue.global(qos: .userInitiated).async {
-            VisionOCR.performTextRecognition(cgImage: cgImage) { [weak self] req, _ in
-                let lines = (req.results as? [VNRecognizedTextObservation])?.compactMap { $0.topCandidates(1).first?.string } ?? []
-                let text = lines.joined(separator: "\n")
+            VisionOCR.performTextAndQRCodeRecognition(cgImage: cgImage) { [weak self] result in
                 DispatchQueue.main.async {
                     guard let self = self else { return }
-                    // OCR action: 0 = window + copy, 1 = window only, 2 = copy only
+                    // OCR & QR action: 0 = window + copy, 1 = window only, 2 = copy only
                     let ocrAction = UserDefaults.standard.integer(forKey: "ocrAction")
                     let shouldCopy = ocrAction == 0 || ocrAction == 2
                     let shouldShowWindow = ocrAction == 0 || ocrAction == 1
 
-                    if shouldCopy && !text.isEmpty {
+                    if shouldCopy && !result.copyText.isEmpty {
                         NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(text, forType: .string)
+                        NSPasteboard.general.setString(result.copyText, forType: .string)
                     }
                     if shouldShowWindow {
                         self.ocrController?.close()
-                        let ocr = OCRResultController(text: text, image: image)
+                        let ocr = OCRResultController(text: result.text, image: image, qrCodes: result.qrCodes)
                         self.ocrController = ocr
                         ocr.show()
                     }
@@ -431,101 +454,39 @@ extension DetachedEditorWindowController: OverlayViewDelegate {
             ImageEncoder.copyToClipboard(image)
         }
         if mode == 0 || mode == 2 {
-            saveImageToDirectory(image)
+            ImageSaveService.saveToConfiguredFolder(image, sheetWindow: window)
         }
+        let annotationData = currentAnnotationData()
         playCopySound()
-        (NSApp.delegate as? AppDelegate)?.showFloatingThumbnail(image: image)
-
-        autoSaveToHistoryIfNeeded(compositedImage: image)
+        autoSaveToHistoryIfNeeded(compositedImage: image, annotationData: annotationData)
+        (NSApp.delegate as? AppDelegate)?.showFloatingThumbnail(image: image, annotationData: annotationData, historyEntryID: historyEntryID)
     }
 
     func overlayViewDidRequestFileSave() {
         guard let raw = overlayView?.captureSelectedRegion() else { return }
         let image = applyPostProcessing(raw)
-        saveImageToDirectory(image)
-        playCopySound()
-        autoSaveToHistoryIfNeeded(compositedImage: image)
+        ImageSaveService.saveToConfiguredFolder(image, sheetWindow: window) { [weak self] success in
+            if success {
+                self?.playCopySound()
+                self?.autoSaveToHistoryIfNeeded(compositedImage: image)
+            }
+        }
     }
 
     /// Ensure the current editor content is in screenshot history.
     /// Creates a history entry if one doesn't exist yet, and shows the Done button.
-    private func ensureInHistory(compositedImage: NSImage) {
-        guard historyEntryID == nil, let view = overlayView else { return }
-        let annotations = view.annotations.filter { $0.isMovable }
-        let rawImage: NSImage? = annotations.isEmpty ? nil : view.captureSelectedRegionRaw()
+    private func ensureInHistory(compositedImage: NSImage, annotationData: CaptureAnnotationData? = nil) {
+        guard historyEntryID == nil, overlayView != nil else { return }
+        let data = annotationData ?? currentAnnotationData()
         ScreenshotHistory.shared.add(
             image: compositedImage,
-            rawImage: rawImage,
-            annotations: annotations.isEmpty ? nil : annotations)
+            rawImage: data?.rawImage,
+            annotations: data?.annotations,
+            editState: data?.editState)
         historyEntryID = ScreenshotHistory.shared.entries.first?.id
         if historyEntryID != nil {
             topBar?.showDoneButton()
             topBar?.onDone = { [weak self] in self?.commitToHistory() }
-        }
-    }
-
-    private func saveImageToDirectory(_ image: NSImage) {
-        // Resolve the filename now (at request time) so a delayed write or
-        // folder-prompt can't pick up a later timestamp.
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
-        let filename = "Screenshot \(formatter.string(from: Date())).\(ImageEncoder.fileExtension)"
-        if let dirURL = SaveDirectoryAccess.resolveIfAccessible() {
-            Self.writeImage(image, toDirectory: dirURL, filename: filename, securityScoped: true)
-            return
-        }
-        // No authorized save folder (sandbox has no valid bookmark). A raw write
-        // would fail silently, so prompt the user to choose a folder once, then
-        // persist it as a bookmark for this and all future saves (issue #177).
-        requestSaveDirectoryAccess { dirURL, securityScoped in
-            Self.writeImage(image, toDirectory: dirURL, filename: filename, securityScoped: securityScoped)
-        }
-    }
-
-    /// Encode and write `image` into `dirURL` on a background queue, releasing
-    /// the security scope afterward. `defer` guarantees release even on failure.
-    private static func writeImage(_ image: NSImage, toDirectory dirURL: URL,
-                                   filename: String, securityScoped: Bool) {
-        DispatchQueue.global(qos: .userInitiated).async {
-            defer { if securityScoped { SaveDirectoryAccess.stopAccessing(url: dirURL) } }
-            let fileURL = dirURL.appendingPathComponent(filename)
-            guard let imageData = ImageEncoder.encode(image) else { return }
-            do {
-                try imageData.write(to: fileURL)
-            } catch {
-                #if DEBUG
-                NSLog("macshot: failed to save screenshot to \(fileURL.path): \(error.localizedDescription)")
-                #endif
-            }
-        }
-    }
-
-    /// Prompt (on the main thread) for a save folder, persist it as a
-    /// security-scoped bookmark, then hand a scoped URL to `completion`.
-    private func requestSaveDirectoryAccess(completion: @escaping (URL, Bool) -> Void) {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.prompt = L("Choose a folder")
-        panel.directoryURL = SaveDirectoryAccess.directoryHint()
-        let handler: (NSApplication.ModalResponse) -> Void = { response in
-            guard response == .OK, let url = panel.url else { return }
-            SaveDirectoryAccess.save(url: url)
-            // Reopen through the freshly saved bookmark so first-save behavior
-            // matches every later save in sandbox mode.
-            if let scopedURL = SaveDirectoryAccess.resolveIfAccessible() {
-                completion(scopedURL, true)
-                return
-            }
-            let securityScoped = url.startAccessingSecurityScopedResource()
-            completion(url, securityScoped)
-        }
-        // Attach as a sheet to the editor window when present; otherwise app-modal.
-        if let window {
-            panel.beginSheetModal(for: window, completionHandler: handler)
-        } else {
-            panel.begin(completionHandler: handler)
         }
     }
     func overlayViewDidRequestUpload() {
@@ -690,12 +651,12 @@ private class AddCaptureOverlayHandler: NSObject, OverlayWindowControllerDelegat
         }
     }
 
-    func overlayDidRequestPin(_ controller: OverlayWindowController, image: NSImage) {
+    func overlayDidRequestPin(_ controller: OverlayWindowController, image: NSImage, annotationData: CaptureAnnotationData?) {
         dismissOverlays()
         onCapture?(image)
     }
-    func overlayDidRequestOCR(_ controller: OverlayWindowController, text: String, image: NSImage?) {}
-    func overlayDidRequestUpload(_ controller: OverlayWindowController, image: NSImage) {}
+    func overlayDidRequestOCR(_ controller: OverlayWindowController, result: OCRScanResult, image: NSImage?) {}
+    func overlayDidRequestUpload(_ controller: OverlayWindowController, image: NSImage, annotationData: CaptureAnnotationData?) {}
     func overlayDidRequestStartRecording(_ controller: OverlayWindowController, rect: NSRect, screen: NSScreen) {}
     func overlayDidRequestStopRecording(_ controller: OverlayWindowController) {}
     func overlayDidRequestScrollCapture(_ controller: OverlayWindowController, rect: NSRect, screen: NSScreen) {}

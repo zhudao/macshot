@@ -14,13 +14,27 @@ import Cocoa
 /// intercepts clicks on the toolbar itself, leaving the rest of the overlay
 /// interactive.
 final class OverlayChromePanel: NSPanel {
-    // Never become key/main: clicking a toolbar button shouldn't make this panel
-    // the key window, which would put NSGlassEffectView into its brightened
-    // "active" state. Buttons still receive clicks via acceptsFirstMouse.
-    override var canBecomeKey: Bool { false }
+    // By default never become key/main: clicking a toolbar button shouldn't make
+    // this panel the key window, which would put NSGlassEffectView into its
+    // brightened "active" state (buttons still click via acceptsFirstMouse).
+    // Panels that host editable text fields (the resolution box) opt back in,
+    // but become key only when the clicked subview explicitly needs it.
+    private let keyCapable: Bool
+    override var canBecomeKey: Bool {
+        guard keyCapable else { return false }
+        if isKeyWindow { return true }
+        guard let event = NSApp.currentEvent,
+              event.window === self,
+              event.type == .leftMouseDown || event.type == .rightMouseDown || event.type == .otherMouseDown
+        else {
+            return false
+        }
+        return viewRequestsPanelKey(contentView?.hitTest(event.locationInWindow))
+    }
     override var canBecomeMain: Bool { false }
 
-    init(hosting content: NSView, cornerRadius: CGFloat) {
+    init(hosting content: NSView, cornerRadius: CGFloat, canBecomeKey: Bool = false) {
+        self.keyCapable = canBecomeKey
         super.init(contentRect: NSRect(origin: .zero, size: content.frame.size),
                    styleMask: [.borderless, .nonactivatingPanel],
                    backing: .buffered, defer: false)
@@ -31,6 +45,7 @@ final class OverlayChromePanel: NSPanel {
         acceptsMouseMovedEvents = true
         hidesOnDeactivate = false
         isReleasedWhenClosed = false
+        becomesKeyOnlyIfNeeded = canBecomeKey
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         if #available(macOS 26.0, *) { animationBehavior = .none }
 
@@ -55,4 +70,22 @@ final class OverlayChromePanel: NSPanel {
     func place(at screenRect: NSRect) {
         setFrame(screenRect, display: true)
     }
+
+    private func viewRequestsPanelKey(_ view: NSView?) -> Bool {
+        var current = view
+        while let v = current {
+            if (v as? PanelKeyRequestingView)?.requestsPanelKeyForMouseDown == true {
+                return true
+            }
+            current = v.superview
+        }
+        return false
+    }
+}
+
+/// Adopted by controls inside an `OverlayChromePanel` that genuinely need the
+/// panel to become key for a mouse-down, such as editable text fields. Buttons
+/// and background views intentionally do not opt in, keeping glass inactive.
+protocol PanelKeyRequestingView: AnyObject {
+    var requestsPanelKeyForMouseDown: Bool { get }
 }

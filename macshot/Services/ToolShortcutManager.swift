@@ -54,7 +54,7 @@ enum ToolShortcutManager {
             case .upload: return L("Upload")
             case .copy: return L("Copy")
             case .save: return L("Save")
-            case .ocr: return L("OCR Text")
+            case .ocr: return L("OCR & QR")
             case .scrollCapture: return L("Scroll Capture")
             case .beautify: return L("Beautify")
             case .invertColors: return L("Invert Colors")
@@ -167,5 +167,49 @@ enum ToolShortcutManager {
     static func displayString(for action: Action) -> String {
         let k = key(for: action)
         return k.isEmpty ? L("None") : k.uppercased()
+    }
+
+    /// Raw configured shortcut text for toolbar tooltip suffixes.
+    /// Empty string means no shortcut should be shown.
+    static func tooltipShortcut(for toolbarAction: ToolbarButtonAction) -> String? {
+        let action: Action?
+        switch toolbarAction {
+        case .tool(let tool):
+            switch tool {
+            case .pencil: action = .pencil
+            case .arrow: action = .arrow
+            case .line: action = .line
+            case .rectangle: action = .rectangle
+            case .ellipse: action = .ellipse
+            case .marker: action = .marker
+            case .text: action = .text
+            case .number: action = .number
+            case .pixelate: action = .censor
+            case .colorSampler: action = .colorSampler
+            case .stamp: action = .stamp
+            case .measure: action = .measure
+            case .loupe: action = .loupe
+            default: action = nil
+            }
+        case .detach: action = .openInEditor
+        case .pin: action = .pin
+        case .upload: action = .upload
+        case .copy: action = .copy
+        case .save: action = .save
+        case .ocr: action = .ocr
+        case .scrollCapture: action = .scrollCapture
+        case .beautify: action = .beautify
+        case .invertColors: action = .invertColors
+        case .removeBackground: action = .removeBackground
+        case .translate: action = .translate
+        case .undo: action = .undo
+        case .redo: action = .redo
+        case .loupe: action = .loupe
+        default: action = nil
+        }
+
+        guard let action else { return nil }
+        let shortcut = key(for: action).trimmingCharacters(in: .whitespacesAndNewlines)
+        return shortcut.isEmpty ? nil : shortcut
     }
 }

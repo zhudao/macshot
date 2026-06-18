@@ -11,17 +11,19 @@ class OCRResultController: NSObject {
     private var spinnerView: NSProgressIndicator?
 
     private var originalText: String
+    private var qrCodes: [QRCodePayload]
     private var isShowingTranslation = false
 
-    init(text: String, image: NSImage?) {
+    init(text: String, image: NSImage?, qrCodes: [QRCodePayload] = []) {
         self.originalText = text
+        self.qrCodes = qrCodes
         super.init()
-        buildWindow(text: text, image: image)
+        buildWindow(text: text, image: image, qrCodes: qrCodes)
     }
 
     // MARK: - Build
 
-    private func buildWindow(text: String, image: NSImage?) {
+    private func buildWindow(text: String, image: NSImage?, qrCodes: [QRCodePayload]) {
         let W: CGFloat = 720
         let H: CGFloat = 460
         let previewW: CGFloat = image != nil ? 240 : 0
@@ -39,7 +41,7 @@ class OCRResultController: NSObject {
             backing: .buffered,
             defer: false
         )
-        panel.title = L("Text Recognition")
+        panel.title = qrCodes.isEmpty ? L("Text Recognition") : L("Text & QR Recognition")
         panel.level = .floating
         panel.isReleasedWhenClosed = false
         panel.becomesKeyOnlyIfNeeded = false
@@ -83,21 +85,29 @@ class OCRResultController: NSObject {
         let rightX = previewW + gap
         let rightW = W - rightX
         let footerH: CGFloat = 52
-        let headerH: CGFloat = 44
+        let headerH: CGFloat = 52
 
         // Header bar (language selector + stats)
         let header = NSView(frame: NSRect(x: rightX, y: H - headerH, width: rightW, height: headerH))
         header.autoresizingMask = [.width, .minYMargin]
         cv.addSubview(header)
 
+        let headerRow = NSStackView(frame: NSRect(x: 12, y: 12, width: rightW - 24, height: 28))
+        headerRow.orientation = .horizontal
+        headerRow.alignment = .centerY
+        headerRow.distribution = .fill
+        headerRow.spacing = 8
+        headerRow.autoresizingMask = [.width]
+        header.addSubview(headerRow)
+
         // Language popup
         let langLabel = NSTextField(labelWithString: L("Translate to:"))
         langLabel.font = NSFont.systemFont(ofSize: 12)
         langLabel.textColor = .secondaryLabelColor
-        langLabel.frame = NSRect(x: 12, y: (headerH - 16) / 2, width: 90, height: 16)
-        header.addSubview(langLabel)
+        langLabel.setContentHuggingPriority(.required, for: .horizontal)
+        headerRow.addArrangedSubview(langLabel)
 
-        let popup = NSPopUpButton(frame: NSRect(x: 106, y: (headerH - 24) / 2, width: 160, height: 24), pullsDown: false)
+        let popup = NSPopUpButton(frame: .zero, pullsDown: false)
         for lang in TranslationService.availableLanguages {
             popup.addItem(withTitle: lang.name)
             popup.lastItem?.representedObject = lang.code
@@ -109,19 +119,44 @@ class OCRResultController: NSObject {
         }
         popup.target = self
         popup.action = #selector(languageChanged(_:))
-        header.addSubview(popup)
+        popup.widthAnchor.constraint(equalToConstant: 150).isActive = true
+        headerRow.addArrangedSubview(popup)
         self.langPopup = popup
 
-        // Char/word count label (right side of header)
+        // Translate button
+        let translateBtn = NSButton(title: L("Translate"), target: self, action: #selector(toggleTranslate))
+        translateBtn.bezelStyle = .rounded
+        translateBtn.widthAnchor.constraint(equalToConstant: 100).isActive = true
+        headerRow.addArrangedSubview(translateBtn)
+        self.translateButton = translateBtn
+
+        // Spinner (hidden)
+        let spinner = NSProgressIndicator(frame: NSRect(x: 0, y: 0, width: 16, height: 16))
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.isIndeterminate = true
+        spinner.isHidden = true
+        spinner.widthAnchor.constraint(equalToConstant: 16).isActive = true
+        spinner.heightAnchor.constraint(equalToConstant: 16).isActive = true
+        headerRow.addArrangedSubview(spinner)
+        self.spinnerView = spinner
+
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        spacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        headerRow.addArrangedSubview(spacer)
+
+        // Char/word count label
         let charCount = text.count
         let wordCount = text.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).count
         let countLbl = NSTextField(labelWithString: String(format: L("%d chars · %d words"), charCount, wordCount))
         countLbl.font = NSFont.systemFont(ofSize: 11)
         countLbl.textColor = .tertiaryLabelColor
-        countLbl.frame = NSRect(x: rightW - 180, y: (headerH - 14) / 2, width: 168, height: 14)
         countLbl.alignment = .right
-        countLbl.autoresizingMask = [.minXMargin]
-        header.addSubview(countLbl)
+        countLbl.lineBreakMode = .byTruncatingTail
+        countLbl.setContentHuggingPriority(.required, for: .horizontal)
+        countLbl.setContentCompressionResistancePriority(.required, for: .horizontal)
+        headerRow.addArrangedSubview(countLbl)
         self.charCountLabel = countLbl
 
         // Header separator
@@ -159,28 +194,12 @@ class OCRResultController: NSObject {
         aiSearchBtn.autoresizingMask = [.minXMargin]
         footer.addSubview(aiSearchBtn)
 
-        // Translate button
-        let translateBtn = NSButton(title: L("Translate"), target: self, action: #selector(toggleTranslate))
-        translateBtn.bezelStyle = .rounded
-        translateBtn.frame = NSRect(x: rightW - 330, y: (footerH - 28) / 2, width: 100, height: 28)
-        translateBtn.autoresizingMask = [.minXMargin]
-        footer.addSubview(translateBtn)
-        self.translateButton = translateBtn
-
-        // Spinner (hidden)
-        let spinner = NSProgressIndicator(frame: NSRect(x: rightW - 350, y: (footerH - 16) / 2, width: 16, height: 16))
-        spinner.style = .spinning
-        spinner.controlSize = .small
-        spinner.isIndeterminate = true
-        spinner.isHidden = true
-        spinner.autoresizingMask = [.minXMargin]
-        footer.addSubview(spinner)
-        self.spinnerView = spinner
+        let qrSectionH = qrCodes.isEmpty ? CGFloat(0) : min(CGFloat(46 + qrCodes.count * 36), 168)
 
         // Scrollable text view
         let textAreaY = footerH + 1
-        let textAreaH = H - headerH - 1 - footerH - 1
-        let scrollView = NSScrollView(frame: NSRect(x: rightX, y: textAreaY, width: rightW, height: textAreaH))
+        let textAreaH = H - headerH - 1 - footerH - 1 - qrSectionH
+        let scrollView = NSScrollView(frame: NSRect(x: rightX, y: textAreaY + qrSectionH, width: rightW, height: textAreaH))
         scrollView.autoresizingMask = [.width, .height]
         scrollView.hasVerticalScroller = true
         scrollView.borderType = .noBorder
@@ -199,8 +218,9 @@ class OCRResultController: NSObject {
         tv.textContainer?.widthTracksTextView = true
         tv.autoresizingMask = [.width, .height]
         tv.drawsBackground = false
+        let noTextMessage = L("(No text detected in the selected area)")
         tv.string = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? L("(No text detected in the selected area)")
+            ? noTextMessage
             : text
         if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             tv.textColor = .secondaryLabelColor
@@ -209,8 +229,78 @@ class OCRResultController: NSObject {
         scrollView.documentView = tv
         self.textView = tv
 
+        if !qrCodes.isEmpty {
+            let qrSection = makeQRCodeSection(
+                qrCodes: qrCodes,
+                frame: NSRect(x: rightX, y: textAreaY, width: rightW, height: qrSectionH)
+            )
+            qrSection.autoresizingMask = [.width, .maxYMargin]
+            cv.addSubview(qrSection)
+        }
+
         panel.contentView = cv
         self.window = panel
+    }
+
+    private func makeQRCodeSection(qrCodes: [QRCodePayload], frame: NSRect) -> NSView {
+        let section = NSView(frame: frame)
+
+        let topSep = NSBox(frame: NSRect(x: 0, y: frame.height - 1, width: frame.width, height: 1))
+        topSep.boxType = .separator
+        topSep.autoresizingMask = [.width, .minYMargin]
+        section.addSubview(topSep)
+
+        let title = NSTextField(labelWithString: qrCodes.count == 1 ? L("QR Code") : L("QR Codes"))
+        title.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        title.textColor = .secondaryLabelColor
+        title.frame = NSRect(x: 14, y: frame.height - 28, width: 160, height: 18)
+        title.autoresizingMask = [.maxYMargin]
+        section.addSubview(title)
+
+        let rowH: CGFloat = 30
+        var rowY = frame.height - 32 - rowH
+        for (idx, qrCode) in qrCodes.enumerated() where rowY >= 6 {
+            let hasURL = qrCode.url != nil
+            let copyW: CGFloat = 56
+            let openW: CGFloat = hasURL ? 86 : 0
+            let gap: CGFloat = hasURL ? 8 : 0
+            let rightPad: CGFloat = 12
+            let buttonsW = copyW + openW + gap + rightPad
+
+            let valueField = NSTextField(frame: NSRect(x: 14, y: rowY + 4, width: frame.width - 28 - buttonsW, height: 22))
+            valueField.stringValue = qrCode.value
+            valueField.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+            valueField.textColor = .labelColor
+            valueField.isEditable = false
+            valueField.isSelectable = true
+            valueField.isBordered = false
+            valueField.drawsBackground = false
+            valueField.lineBreakMode = .byTruncatingMiddle
+            valueField.autoresizingMask = [.width]
+            section.addSubview(valueField)
+
+            var buttonX = frame.width - rightPad - copyW
+            let copy = NSButton(title: L("Copy"), target: self, action: #selector(copyQRCode(_:)))
+            copy.bezelStyle = .rounded
+            copy.tag = idx
+            copy.frame = NSRect(x: buttonX, y: rowY + 2, width: copyW, height: 26)
+            copy.autoresizingMask = [.minXMargin]
+            section.addSubview(copy)
+
+            if hasURL {
+                buttonX -= openW + gap
+                let open = NSButton(title: L("Open Link"), target: self, action: #selector(openQRCode(_:)))
+                open.bezelStyle = .rounded
+                open.tag = idx
+                open.frame = NSRect(x: buttonX, y: rowY + 2, width: openW, height: 26)
+                open.autoresizingMask = [.minXMargin]
+                section.addSubview(open)
+            }
+
+            rowY -= rowH + 6
+        }
+
+        return section
     }
 
     // MARK: - Show / Close
@@ -237,10 +327,25 @@ class OCRResultController: NSObject {
     // MARK: - Actions
 
     @objc private func copyAll() {
-        guard let text = textView?.string, !text.isEmpty else { return }
+        let text = textView?.string ?? ""
+        let noTextMessage = L("(No text detected in the selected area)")
+        let copyText = text == noTextMessage ? qrCodes.map(\.value).joined(separator: "\n") : text
+        guard !copyText.isEmpty else { return }
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
+        NSPasteboard.general.setString(copyText, forType: .string)
         close()
+    }
+
+    @objc private func copyQRCode(_ sender: NSButton) {
+        guard sender.tag >= 0, sender.tag < qrCodes.count else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(qrCodes[sender.tag].value, forType: .string)
+    }
+
+    @objc private func openQRCode(_ sender: NSButton) {
+        guard sender.tag >= 0, sender.tag < qrCodes.count,
+              let url = qrCodes[sender.tag].url else { return }
+        NSWorkspace.shared.open(url)
     }
 
     @objc private func openAISearch() {

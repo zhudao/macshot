@@ -4,7 +4,7 @@ import Cocoa
 /// Matches the existing dark toolbar look: purple accent, SF Symbols, color swatches.
 class ToolbarButtonView: NSView {
 
-    let action: ToolbarButtonAction
+    var action: ToolbarButtonAction
     var sfSymbol: String?
     var isOn: Bool = false { didSet { if oldValue != isOn { cachedIcon = nil; needsDisplay = true } } }
     var tintColor: NSColor = ToolbarLayout.iconColor { didSet { cachedIcon = nil; cachedIconIsOn = nil; needsDisplay = true } }
@@ -16,6 +16,7 @@ class ToolbarButtonView: NSView {
     private var isHovered: Bool = false
     var isPressed: Bool = false
     private var trackingArea: NSTrackingArea?
+    private var suppressHoverStartPoint: NSPoint?
     private var cachedIcon: NSImage?       // cached tinted SF Symbol for current state
     private var cachedIconIsOn: Bool?       // the isOn state when icon was cached
 
@@ -48,6 +49,30 @@ class ToolbarButtonView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    func configure(with data: ToolbarButton) {
+        action = data.action
+        isOn = data.isSelected
+        tintColor = data.tintColor
+        swatchColor = data.bgColor
+        sfSymbol = data.sfSymbol
+        tooltipText = data.tooltip
+        hasContextMenu = data.hasContextMenu
+        if case .micAudio = action {
+            // Preserve the live mic meter while this reused view is still the
+            // mic button.
+        } else {
+            micLevel = 0
+        }
+        // Only the move button uses onMouseDown for synchronous drag tracking.
+        // Reset it when a reused slot changes meaning; OverlayView assigns it
+        // again to the current move button after updating the strip.
+        onMouseDown = nil
+        dragForwardTarget = nil
+        forwardingDrag = false
+        isPressed = false
+        needsDisplay = true
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         // Background
@@ -152,7 +177,7 @@ class ToolbarButtonView: NSView {
         // (Liquid Glass chrome). With `.activeInActiveApp`, mouseExited wouldn't
         // fire when the app isn't frontmost, leaving a previous button stuck in
         // its hover state when moving to another.
-        trackingArea = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .cursorUpdate, .activeAlways], owner: self, userInfo: nil)
+        trackingArea = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .mouseMoved, .cursorUpdate, .activeAlways], owner: self, userInfo: nil)
         addTrackingArea(trackingArea!)
     }
 
@@ -162,15 +187,56 @@ class ToolbarButtonView: NSView {
     // crosshair / hidden drawing-cursor that would otherwise bleed through.
     override func cursorUpdate(with event: NSEvent) { NSCursor.arrow.set() }
 
+    private var owningStrip: ToolbarStripView? {
+        superview as? ToolbarStripView ?? superview?.superview as? ToolbarStripView
+    }
+
     override func mouseEntered(with event: NSEvent) {
         NSCursor.arrow.set()
+        guard owningStrip?.suppressesHover != true else {
+            setHovered(false)
+            return
+        }
+        guard suppressHoverStartPoint == nil else {
+            setHovered(false)
+            return
+        }
         // Robustly clear any sibling that AppKit failed to send mouseExited to
         // (common in non-activating glass chrome panels) so only one button is
         // ever hovered.
-        (superview as? ToolbarStripView ?? superview?.superview as? ToolbarStripView)?.clearHover(except: self)
-        isHovered = true; needsDisplay = true; onHover?(action, true)
+        owningStrip?.clearHover(except: self)
+        setHovered(true)
     }
-    override func mouseExited(with event: NSEvent) { setHovered(false) }
+
+    override func mouseMoved(with event: NSEvent) {
+        NSCursor.arrow.set()
+        guard owningStrip?.suppressesHover != true else {
+            setHovered(false)
+            return
+        }
+        if let start = suppressHoverStartPoint {
+            let now = NSEvent.mouseLocation
+            let dx = now.x - start.x
+            let dy = now.y - start.y
+            // AppKit can synthesize a mouseMoved/entered pass at the same
+            // location after a toolbar drag loop unwinds. Keep hover suppressed
+            // until the pointer actually moves away from the release point.
+            guard dx * dx + dy * dy >= 9 else {
+                setHovered(false)
+                return
+            }
+            suppressHoverStartPoint = nil
+        }
+        if bounds.contains(convert(event.locationInWindow, from: nil)) {
+            owningStrip?.clearHover(except: self)
+            setHovered(true)
+        }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        suppressHoverStartPoint = nil
+        setHovered(false)
+    }
 
     /// Externally force the hover state (used by the strip to clear stale hovers).
     func setHovered(_ hovered: Bool) {
@@ -178,6 +244,19 @@ class ToolbarButtonView: NSView {
         isHovered = hovered
         needsDisplay = true
         onHover?(action, hovered)
+    }
+
+    func clearInteractionState(
+        suppressHoverUntilMouseMoved suppress: Bool = false,
+        clearPressed: Bool = true
+    ) {
+        suppressHoverStartPoint = suppress ? NSEvent.mouseLocation : nil
+        forwardingDrag = false
+        if clearPressed {
+            isPressed = false
+        }
+        setHovered(false)
+        needsDisplay = true
     }
 
     private var forwardingDrag = false

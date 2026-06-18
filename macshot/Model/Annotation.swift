@@ -208,6 +208,8 @@ class Annotation {
     /// preserved across clone/codable so the same arrow renders identically
     /// across redraws and reloads.
     var randomSeed: UInt32 = UInt32.random(in: 1...UInt32.max)
+    /// Magnification factor for loupe annotations.
+    var loupeMagnification: CGFloat = 2.0
 
     init(tool: AnnotationTool, startPoint: NSPoint, endPoint: NSPoint, color: NSColor, strokeWidth: CGFloat) {
         self.tool = tool
@@ -255,6 +257,7 @@ class Annotation {
         c.fontFamilyName = fontFamilyName
         c.outlineColor = outlineColor
         c.randomSeed = randomSeed
+        c.loupeMagnification = loupeMagnification
         return c
     }
 
@@ -278,11 +281,28 @@ class Annotation {
         textAlignment = src.textAlignment
         fontFamilyName = src.fontFamilyName
         numberFormat = src.numberFormat
+        loupeMagnification = src.loupeMagnification
+        if tool == .loupe {
+            startPoint = src.startPoint
+            endPoint = src.endPoint
+            bakedBlurNSImage = nil
+            bakeLoupe()
+        }
         measureInPoints = src.measureInPoints
         censorMode = src.censorMode
     }
 
     var boundingRect: NSRect {
+        if tool == .number {
+            let radius = 8 + strokeWidth * 3
+            let circleRect = NSRect(
+                x: startPoint.x - radius, y: startPoint.y - radius,
+                width: radius * 2, height: radius * 2)
+            let tipRect = NSRect(x: endPoint.x, y: endPoint.y, width: 0, height: 0)
+                .insetBy(dx: -max(2, strokeWidth), dy: -max(2, strokeWidth))
+            return circleRect.union(tipRect)
+        }
+
         var minX = min(startPoint.x, endPoint.x)
         var minY = min(startPoint.y, endPoint.y)
         var maxX = max(startPoint.x, endPoint.x)
@@ -391,12 +411,18 @@ class Annotation {
             let nx = (point.x - cx) / rx, ny = (point.y - cy) / ry
             let d = nx * nx + ny * ny
             let rNorm = threshold / min(rx, ry)
-            return abs(d - 1.0) < rNorm * 2
+            return d <= (1.0 + rNorm) * (1.0 + rNorm)
         case .text:
             return textDrawRect.insetBy(dx: -threshold, dy: -threshold).contains(point)
         case .number:
             let radius = 8 + strokeWidth * 3 + threshold
-            return hypot(point.x - startPoint.x, point.y - startPoint.y) < radius
+            if hypot(point.x - startPoint.x, point.y - startPoint.y) < radius {
+                return true
+            }
+            let pointerDistance = hypot(endPoint.x - startPoint.x, endPoint.y - startPoint.y)
+            guard pointerDistance > 4 else { return false }
+            let pointerThreshold = max(threshold, strokeWidth * 2)
+            return distanceToLineSegment(point: point, from: startPoint, to: endPoint) < pointerThreshold
         case .stamp, .pixelate, .blur:
             return boundingRect.insetBy(dx: -threshold, dy: -threshold).contains(point)
         default:
@@ -1676,44 +1702,78 @@ class Annotation {
     private func drawNumber() {
         guard let number = number else { return }
         let radius: CGFloat = 8 + strokeWidth * 3
+        let outlineWidth: CGFloat = 3
         let center = startPoint
 
-        // Draw pointer cone if dragged (startPoint != endPoint)
         let dx = endPoint.x - startPoint.x
         let dy = endPoint.y - startPoint.y
         let dist = hypot(dx, dy)
-        if dist > 4 {
+        var coneFillPath: NSBezierPath?
+        var coneOutlinePath: NSBezierPath?
+        if dist > radius + outlineWidth {
             let angle = atan2(dy, dx)
-            // Cone base width tapers from the circle edge, narrowing to a point
             let baseHalfWidth = radius * 0.55
             let perpAngle = angle + .pi / 2
 
-            // Base points on the circle's edge
-            let baseL = NSPoint(x: center.x + baseHalfWidth * cos(perpAngle),
-                                y: center.y + baseHalfWidth * sin(perpAngle))
-            let baseR = NSPoint(x: center.x - baseHalfWidth * cos(perpAngle),
-                                y: center.y - baseHalfWidth * sin(perpAngle))
+            let fillBaseL = NSPoint(x: center.x + baseHalfWidth * cos(perpAngle),
+                                    y: center.y + baseHalfWidth * sin(perpAngle))
+            let fillBaseR = NSPoint(x: center.x - baseHalfWidth * cos(perpAngle),
+                                    y: center.y - baseHalfWidth * sin(perpAngle))
+
+            func circleIntersection(from tip: NSPoint, to innerBase: NSPoint) -> NSPoint {
+                let vx = innerBase.x - tip.x
+                let vy = innerBase.y - tip.y
+                let fx = tip.x - center.x
+                let fy = tip.y - center.y
+                let outlineRadius = radius + outlineWidth
+                let a = vx * vx + vy * vy
+                let b = 2 * (fx * vx + fy * vy)
+                let c = fx * fx + fy * fy - outlineRadius * outlineRadius
+                let disc = b * b - 4 * a * c
+                guard a > 0, disc >= 0 else { return innerBase }
+                let root = sqrt(disc)
+                let candidates = [(-b - root) / (2 * a), (-b + root) / (2 * a)]
+                    .filter { $0 >= 0 && $0 <= 1 }
+                    .sorted()
+                guard let t = candidates.first else { return innerBase }
+                return NSPoint(x: tip.x + vx * t, y: tip.y + vy * t)
+            }
+
+            let outlineBaseL = circleIntersection(from: endPoint, to: fillBaseL)
+            let outlineBaseR = circleIntersection(from: endPoint, to: fillBaseR)
 
             let cone = NSBezierPath()
-            cone.move(to: baseL)
+            cone.move(to: fillBaseL)
             cone.line(to: endPoint)
-            cone.line(to: baseR)
+            cone.line(to: fillBaseR)
             cone.close()
-            color.setFill()
-            cone.fill()
+            coneFillPath = cone
+
+            let outline = NSBezierPath()
+            outline.move(to: outlineBaseL)
+            outline.line(to: endPoint)
+            outline.line(to: outlineBaseR)
+            coneOutlinePath = outline
         }
 
-        // Draw the circle on top of the cone
         let circleRect = NSRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2)
-        // Outline behind circle
         if let oc = outlineColor {
-            let outlineCircle = NSBezierPath(ovalIn: circleRect.insetBy(dx: -2, dy: -2))
-            outlineCircle.lineWidth = 3
-            oc.setStroke()
-            outlineCircle.stroke()
+            oc.setFill()
+            NSBezierPath(ovalIn: circleRect.insetBy(dx: -outlineWidth, dy: -outlineWidth)).fill()
         }
         color.setFill()
         NSBezierPath(ovalIn: circleRect).fill()
+
+        if let coneFillPath {
+            if let oc = outlineColor, let coneOutlinePath {
+                coneOutlinePath.lineWidth = outlineWidth * 2
+                coneOutlinePath.lineJoinStyle = .round
+                oc.setStroke()
+                coneOutlinePath.stroke()
+            }
+            color.setFill()
+            coneFillPath.fill()
+        }
 
         // Choose contrasting text color: black for light backgrounds, white for dark
         let textColor: NSColor = {
@@ -2117,7 +2177,7 @@ class Annotation {
         let scaleY = imageSize.height / bounds.height
         
         let rect = boundingRect
-        let scale: CGFloat = 2.0 // 2x Magnification
+        let scale = max(1.1, loupeMagnification)
         
         // Always force a perfect circle
         let size = min(rect.width, rect.height)
@@ -2210,7 +2270,7 @@ class Annotation {
             let imgSize = image.size
             let scaleX = imgSize.width / sourceImageBounds.width
             let scaleY = imgSize.height / sourceImageBounds.height
-            let magnification: CGFloat = 2.0
+            let magnification = max(1.1, loupeMagnification)
             let srcSize = size / magnification
             let cx = rect.midX, cy = rect.midY
             let fromRect = NSRect(

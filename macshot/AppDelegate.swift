@@ -3,6 +3,7 @@ import Carbon
 import Sparkle
 import UniformTypeIdentifiers
 import AVFoundation
+import Vision
 import WebP
 
 enum CaptureMenuItemID: String, CaseIterable {
@@ -27,7 +28,7 @@ enum CaptureMenuItemID: String, CaseIterable {
         switch self {
         case .captureArea: return L("Capture Area")
         case .captureScreen: return L("Capture Screen")
-        case .captureOCR: return L("Capture OCR")
+        case .captureOCR: return L("Capture OCR & QR")
         case .quickCapture: return L("Quick Capture")
         case .captureLastArea: return L("Capture Last Area")
         case .scrollCapture: return L("Scroll Capture")
@@ -217,11 +218,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     private var captureSessionID: UInt = 0
     private var captureTimingTrace: CaptureTimingTrace?
     /// App Nap suppression assertion. Held for the app's lifetime so global
-    /// hotkeys respond instantly instead of paying a 1-2s wake-up penalty
-    /// when macshot has been idle. `.userInitiated` keeps the process
-    /// running (not idle) and prevents macOS from treating the app as
-    /// eligible for Jetsam (memory-pressure termination), while still
-    /// allowing the system to sleep when the lid is closed.
+    /// hotkeys respond instantly instead of paying a wake-up penalty when
+    /// macshot has been idle. Use the idle-sleep-safe variant: plain
+    /// `.userInitiated` creates a `PreventUserIdleSystemSleep` assertion and
+    /// keeps Macs awake indefinitely.
     private var appNapAssertion: NSObjectProtocol?
 
     /// Shared capture sound — loaded once, reused everywhere.
@@ -245,14 +245,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         }
 
         // Disable App Nap. macshot is LSUIElement with no visible windows
-        // when idle, so macOS aggressively sleeps it — which adds 1-2s of
-        // wake-up latency to global hotkey captures. We hold this assertion
-        // for the app's lifetime. `.userInitiated` keeps the process
-        // running and reduces the likelihood of Jetsam (memory-pressure)
-        // termination when the system reclaims memory from background
-        // LSUIElement processes, while still allowing system sleep.
+        // when idle, so macOS can add wake-up latency to global hotkey
+        // captures. The "allowing idle system sleep" variant keeps the
+        // responsiveness hint without creating a PreventUserIdleSystemSleep
+        // assertion that blocks normal sleep.
         appNapAssertion = ProcessInfo.processInfo.beginActivity(
-            options: [.userInitiated],
+            options: [.userInitiatedAllowingIdleSystemSleep],
             reason: "Global hotkey responsiveness")
 
         // Open a signal-safe log fd and register the SIGTERM handler.
@@ -588,6 +586,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         appMenu.addItem(withTitle: "Quit macshot", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appMenuItem.submenu = appMenu
 
+        let editMenuItem = NSMenuItem()
+        mainMenu.addItem(editMenuItem)
+
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        editMenu.addItem(NSMenuItem.separator())
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Delete", action: #selector(NSText.delete(_:)), keyEquivalent: "")
+        editMenu.addItem(NSMenuItem.separator())
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenuItem.submenu = editMenu
+
         NSApp.mainMenu = mainMenu
     }
 
@@ -599,21 +612,52 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         rebuildStatusBarMenu()
     }
 
+    // User-customizable menu bar icon (see Settings → General → Appearance).
+    // Mode is "default" (bundled StatusBarIcon asset) or "symbol" (a user-chosen SF Symbol).
+    static let statusBarIconModeKey = "statusBarIconMode"
+    static let statusBarIconSymbolNameKey = "statusBarIconSymbolName"
+
     private func applyNormalStatusBarIcon() {
         if let button = statusItem.button {
-            if let img = NSImage(named: "StatusBarIcon") {
-                img.isTemplate = true
-                img.size = NSSize(width: 22, height: 22)
-                button.image = img
-            } else {
-                button.title = "macshot"
-            }
+            applyPreferredIconImage(to: button)
             // Use custom click handler so we can dismiss modals before showing the menu
             button.target = self
             button.action = #selector(statusBarIconClicked(_:))
             button.sendAction(on: [.leftMouseDown, .rightMouseDown])
             (button.cell as? NSButtonCell)?.highlightsBy = .pushInCellMask
         }
+    }
+
+    /// Sets the button image/title from the user's icon preference. "symbol" mode renders
+    /// the chosen SF Symbol as a 22pt template image; anything else — including an empty or
+    /// invalid symbol name — falls back to the bundled icon so the item is never blank.
+    private func applyPreferredIconImage(to button: NSStatusBarButton) {
+        let mode = UserDefaults.standard.string(forKey: Self.statusBarIconModeKey) ?? "default"
+        let symbolName = UserDefaults.standard.string(forKey: Self.statusBarIconSymbolNameKey) ?? ""
+
+        if mode == "symbol", !symbolName.isEmpty,
+           let symbol = NSImage(systemSymbolName: symbolName, accessibilityDescription: "macshot") {
+            symbol.isTemplate = true
+            symbol.size = NSSize(width: 22, height: 22)
+            button.image = symbol
+            button.title = ""
+        } else if let img = NSImage(named: "StatusBarIcon") {
+            img.isTemplate = true
+            img.size = NSSize(width: 22, height: 22)
+            button.image = img
+            button.title = ""
+        } else {
+            button.image = nil
+            button.title = "macshot"
+        }
+    }
+
+    /// Re-applies the menu bar icon to reflect the user's current preference. Invoked live
+    /// from Settings so changes take effect without a relaunch. No-op while recording — the
+    /// recording state owns the icon then and restores the preferred one when it ends.
+    func refreshStatusBarIcon() {
+        guard recordingEngine == nil, let button = statusItem.button else { return }
+        applyPreferredIconImage(to: button)
     }
 
     @objc private func statusBarIconClicked(_ sender: NSStatusBarButton) {
@@ -811,6 +855,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             },
             pinFromClipboard: { [weak self] in
                 DispatchQueue.main.async { self?.pinFromClipboard() }
+            },
+            clearHistory: { [weak self] in
+                DispatchQueue.main.async { self?.clearHistorySilently() }
             }
         )
     }
@@ -1043,6 +1090,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         // so new OverlayView instances start clean.
         let rememberTool = UserDefaults.standard.object(forKey: "rememberLastTool") as? Bool ?? true
         if !rememberTool {
+            OverlayView.resetRememberedTool()
             UserDefaults.standard.removeObject(forKey: "effectsPreset")
             UserDefaults.standard.removeObject(forKey: "effectsBrightness")
             UserDefaults.standard.removeObject(forKey: "effectsContrast")
@@ -1575,34 +1623,84 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
 
         let controller = FloatingThumbnailController(image: image)
         controller.historyEntryID = historyEntryID
+        controller.annotationData = annotationData
         controller.onDismiss = { [weak self] in
             self?.thumbnailControllers.removeAll { $0 === controller }
             self?.reflowThumbnails()
         }
-        controller.onCopy = {
+        controller.onCopy = { [weak controller] in
+            guard let image = controller?.image else { return }
             ImageEncoder.copyToClipboard(image)
         }
-        controller.onSave = { [weak self] in
-            guard let self = self else { return }
-            self.saveImageToFile(image)
+        controller.onSave = { [weak self, weak controller] in
+            guard let self = self, let image = controller?.image else { return }
+            self.saveThumbnailImage(image)
         }
-        controller.onPin = { [weak self] in
-            guard let self = self else { return }
-            ScreenshotHistory.shared.add(image: image)
+        controller.onSaveAs = { [weak self, weak controller] in
+            guard let self = self, let image = controller?.image else { return }
+            self.saveThumbnailImageAs(image)
+        }
+        controller.onPin = { [weak self, weak controller] in
+            guard let self = self, let controller = controller else { return }
+            let image = controller.image
+            let data = controller.annotationData
+            ScreenshotHistory.shared.add(
+                image: image,
+                rawImage: data?.rawImage,
+                annotations: data?.annotations,
+                editState: data?.editState
+            )
             self.showPin(image: image)
         }
-        controller.onEdit = {
-            if let data = annotationData {
-                DetachedEditorWindowController.open(image: data.rawImage, annotations: data.annotations, historyEntryID: historyEntryID)
-            } else {
-                // Image already has beautify/effects baked in — disable to avoid double-applying
-                DetachedEditorWindowController.open(image: image, historyEntryID: historyEntryID, disableBeautify: true)
+        controller.onEdit = { [weak controller] in
+            guard let controller else { return }
+            let image = controller.image
+            let id = controller.historyEntryID ?? historyEntryID
+            if let data = controller.annotationData {
+                DetachedEditorWindowController.open(
+                    image: data.rawImage,
+                    annotations: data.annotations,
+                    historyEntryID: id,
+                    editState: data.editState
+                )
+                return
+            }
+            if let id,
+               let entry = ScreenshotHistory.shared.entries.first(where: { $0.id == id }),
+               let rawImage = ScreenshotHistory.shared.loadRawImage(for: entry),
+               let annotations = ScreenshotHistory.shared.loadAnnotations(for: entry) {
+                let editState = ScreenshotHistory.shared.loadEditState(for: entry)
+                DetachedEditorWindowController.open(
+                    image: rawImage,
+                    annotations: annotations,
+                    historyEntryID: id,
+                    editState: editState
+                )
+                return
+            }
+            // Image already has beautify/effects baked in — disable to avoid double-applying
+            DetachedEditorWindowController.open(image: image, historyEntryID: id, disableBeautify: true)
+        }
+        controller.onUpload = { [weak self, weak controller] in
+            guard let self = self, let controller = controller else { return }
+            let image = controller.image
+            let data = controller.annotationData
+            ScreenshotHistory.shared.add(
+                image: image,
+                rawImage: data?.rawImage,
+                annotations: data?.annotations,
+                editState: data?.editState
+            )
+            self.showUploadProgress(image: image)
+        }
+        controller.onTransform = { transformed in
+            if let id = historyEntryID {
+                ScreenshotHistory.shared.updateEntry(id: id, compositedImage: transformed, rawImage: nil, annotations: nil)
             }
         }
-        controller.onUpload = { [weak self] in
-            guard let self = self else { return }
-            ScreenshotHistory.shared.add(image: image)
-            self.showUploadProgress(image: image)
+        controller.onOCR = { [weak self, weak controller] in
+            guard let image = controller?.image else { return }
+            self?.runOCR(on: image)
         }
         controller.onDelete = {
             if let id = historyEntryID {
@@ -1700,9 +1798,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     }
 
     /// Update a floating thumbnail's image if it matches the given history entry.
-    func refreshThumbnail(for entryID: String, image: NSImage) {
+    func refreshThumbnail(for entryID: String, image: NSImage, annotationData: CaptureAnnotationData? = nil) {
         for tc in thumbnailControllers where tc.historyEntryID == entryID {
-            tc.updateImage(image)
+            tc.updateImage(image, annotationData: annotationData)
         }
     }
 
@@ -1713,22 +1811,51 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         Self.captureSound?.play()
     }
 
-    private func saveImageToFile(_ image: NSImage) {
-        guard let imageData = ImageEncoder.encode(image) else { return }
-        let savePanel = NSSavePanel()
-        savePanel.allowedContentTypes = [ImageEncoder.utType]
-        savePanel.nameFieldStringValue = FilenameFormatter.defaultImageFilename()
-        savePanel.directoryURL = SaveDirectoryAccess.directoryHint()
-        savePanel.level = .floating
+    func runOCR(on image: NSImage) {
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
 
-        NSApp.activate(ignoringOtherApps: true)
-        DispatchQueue.main.async {
-            savePanel.begin { response in
-                if response == .OK, let url = savePanel.url {
-                    try? imageData.write(to: url)
+        DispatchQueue.global(qos: .userInitiated).async {
+            VisionOCR.performTextAndQRCodeRecognition(cgImage: cgImage) { [weak self] result in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    let ocrAction = UserDefaults.standard.integer(forKey: "ocrAction")
+                    let shouldCopy = ocrAction == 0 || ocrAction == 2
+                    let shouldShowWindow = ocrAction == 0 || ocrAction == 1
+
+                    if shouldCopy && !result.copyText.isEmpty {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(result.copyText, forType: .string)
+                    }
+
+                    if shouldShowWindow {
+                        self.ocrController?.close()
+                        let ocr = OCRResultController(text: result.text, image: image, qrCodes: result.qrCodes)
+                        self.ocrController = ocr
+                        ocr.show()
+                    }
                 }
             }
         }
+    }
+
+    private func saveThumbnailImage(_ image: NSImage) {
+        ImageSaveService.save(image, panelLevel: .floating, activateApp: true) { [weak self] success in
+            if success {
+                self?.playCopySound()
+            }
+        }
+    }
+
+    private func saveThumbnailImageAs(_ image: NSImage) {
+        ImageSaveService.showSavePanel(for: image, panelLevel: .floating, activateApp: true) { [weak self] success in
+            if success {
+                self?.playCopySound()
+            }
+        }
+    }
+
+    private func saveImageToConfiguredFolder(_ image: NSImage) {
+        ImageSaveService.saveToConfiguredFolder(image, panelLevel: .floating, activateApp: true)
     }
 
     // MARK: - Upload
@@ -2025,7 +2152,8 @@ extension AppDelegate: OverlayWindowControllerDelegate {
             ScreenshotHistory.shared.add(
                 image: image,
                 rawImage: annotationData?.rawImage,
-                annotations: annotationData?.annotations)
+                annotations: annotationData?.annotations,
+                editState: annotationData?.editState)
             captureTimingTrace?.mark("screenshot added to history")
             // The entry just added is at index 0
             let entryID = ScreenshotHistory.shared.entries.first?.id
@@ -2039,7 +2167,12 @@ extension AppDelegate: OverlayWindowControllerDelegate {
             // "Also open in Editor" preference — open with history entry ID so Done saves back
             if UserDefaults.standard.bool(forKey: "quickCaptureOpenEditor") {
                 if let data = annotationData {
-                    DetachedEditorWindowController.open(image: data.rawImage, annotations: data.annotations, historyEntryID: entryID)
+                    DetachedEditorWindowController.open(
+                        image: data.rawImage,
+                        annotations: data.annotations,
+                        historyEntryID: entryID,
+                        editState: data.editState
+                    )
                 } else {
                     DetachedEditorWindowController.open(image: image, historyEntryID: entryID, disableBeautify: true)
                 }
@@ -2112,8 +2245,13 @@ extension AppDelegate: OverlayWindowControllerDelegate {
         return NSImage(cgImage: cgImage, size: globalRect.size)
     }
 
-    func overlayDidRequestPin(_ controller: OverlayWindowController, image: NSImage) {
-        ScreenshotHistory.shared.add(image: image)
+    func overlayDidRequestPin(_ controller: OverlayWindowController, image: NSImage, annotationData: CaptureAnnotationData?) {
+        ScreenshotHistory.shared.add(
+            image: image,
+            rawImage: annotationData?.rawImage,
+            annotations: annotationData?.annotations,
+            editState: annotationData?.editState
+        )
         let appToRefocus = previousApp
         dismissOverlays(refocusPreviousApp: false)
         let pin = PinWindowController(image: image)
@@ -2126,28 +2264,33 @@ extension AppDelegate: OverlayWindowControllerDelegate {
         }
     }
 
-    func overlayDidRequestOCR(_ controller: OverlayWindowController, text: String, image: NSImage?) {
-        // OCR action: 0 = window + copy (default), 1 = window only, 2 = copy only
+    func overlayDidRequestOCR(_ controller: OverlayWindowController, result: OCRScanResult, image: NSImage?) {
+        // OCR & QR action: 0 = window + copy (default), 1 = window only, 2 = copy only
         let ocrAction = UserDefaults.standard.integer(forKey: "ocrAction")
         let shouldCopy = ocrAction == 0 || ocrAction == 2
         let shouldShowWindow = ocrAction == 0 || ocrAction == 1
         dismissOverlays(refocusPreviousApp: !shouldShowWindow)
 
-        if shouldCopy && !text.isEmpty {
+        if shouldCopy && !result.copyText.isEmpty {
             NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(text, forType: .string)
+            NSPasteboard.general.setString(result.copyText, forType: .string)
         }
 
         if shouldShowWindow {
             ocrController?.close()
-            let ocr = OCRResultController(text: text, image: image)
+            let ocr = OCRResultController(text: result.text, image: image, qrCodes: result.qrCodes)
             ocrController = ocr
             ocr.show()
         }
     }
 
-    func overlayDidRequestUpload(_ controller: OverlayWindowController, image: NSImage) {
-        ScreenshotHistory.shared.add(image: image)
+    func overlayDidRequestUpload(_ controller: OverlayWindowController, image: NSImage, annotationData: CaptureAnnotationData?) {
+        ScreenshotHistory.shared.add(
+            image: image,
+            rawImage: annotationData?.rawImage,
+            annotations: annotationData?.annotations,
+            editState: annotationData?.editState
+        )
         let appToRefocus = previousApp
         dismissOverlays(refocusPreviousApp: false)
         showUploadProgress(image: image)
@@ -2836,13 +2979,13 @@ extension AppDelegate: OverlayWindowControllerDelegate {
             ImageEncoder.copyToClipboard(image)
         }
         if mode == 0 || mode == 2 {
-            saveImageToFile(image)
+            saveImageToConfiguredFolder(image)
         }
         playCopySound()
         showFloatingThumbnail(image: image)
 
         if UserDefaults.standard.bool(forKey: "quickCaptureOpenEditor") {
-            DetachedEditorWindowController.open(image: image, historyEntryID: entryID)
+            DetachedEditorWindowController.open(image: image, historyEntryID: entryID, disableBeautify: true)
         }
     }
 
@@ -2909,6 +3052,10 @@ extension AppDelegate: NSMenuDelegate {
 
     @objc private func clearHistory() {
         confirmClearHistory()
+    }
+
+    private func clearHistorySilently() {
+        ScreenshotHistory.shared.clear()
     }
 
     /// Show a confirmation dialog before clearing all history. Reused by history panel trash button.

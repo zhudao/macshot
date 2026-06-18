@@ -18,6 +18,7 @@
 "Capture Area" = "Capture Area";
 "Capture Screen" = "Capture Screen";
 "Capture OCR" = "Capture OCR";
+"Capture OCR & QR" = "Capture OCR & QR";
 "Quick Capture" = "Quick Capture";
 "Scroll Capture" = "Scroll Capture";
 "Capture Delay" = "Capture Delay";
@@ -97,6 +98,8 @@
 "OCR" = "OCR";
 "OCR Text" = "OCR Text";
 "OCR (extract text)" = "OCR (extract text)";
+"OCR & QR" = "OCR & QR";
+"Run OCR & QR" = "Run OCR & QR";
 "Upload" = "Upload";
 "Share" = "Share";
 "Undo" = "Undo";
@@ -143,6 +146,7 @@
 /* Tool Options */
 "Size" = "Size";
 "Stroke" = "Stroke";
+"Zoom" = "Zoom";
 "Radius" = "Radius";
 "Start:" = "Start:";
 "Draw:" = "Draw:";
@@ -172,6 +176,9 @@
 "Click a window  ·  Drag for custom area  ·  F for full screen" = "Click a window  ·  Drag for custom area  ·  F for full screen";
 "Drag to select  ·  Click for full screen" = "Drag to select  ·  Click for full screen";
 "Release to annotate and edit" = "Release to annotate and edit";
+"Release to finish" = "Release to finish";
+"Space to move. Release to annotate and edit" = "Space to move. Release to annotate and edit";
+"Space to move. Release to finish" = "Space to move. Release to finish";
 "Window snap: " = "Window snap: ";
 "ON" = "ON";
 "OFF" = "OFF";
@@ -210,6 +217,7 @@
 "Capture mouse cursor in screenshot" = "Capture mouse cursor in screenshot";
 "Double-click selection to copy" = "Double-click selection to copy";
 "Hide capture instructions" = "Hide capture instructions";
+"Disable shadow outside selection" = "Disable shadow outside selection";
 "Use window title in saved filename" = "Use window title in saved filename";
 "Hide menu bar icon" = "Hide menu bar icon";
 "Hotkeys still work. To show the icon again, re-launch macshot." = "Hotkeys still work. To show the icon again, re-launch macshot.";
@@ -242,6 +250,23 @@
 "Save folder:" = "Save folder:";
 "Browse…" = "Browse…";
 "Appearance" = "Appearance";
+"Freeform" = "Freeform";
+"Aspect ratio & resolution presets" = "Aspect ratio & resolution presets";
+"Aspect ratio" = "Aspect ratio";
+"Resolution" = "Resolution";
+"Keep ratio for next captures" = "Keep ratio for next captures";
+"Units" = "Units";
+"Default" = "Default";
+"Custom symbol" = "Custom symbol";
+"Menu bar icon:" = "Menu bar icon:";
+"Enter any SF Symbol name (e.g. camera.fill) or pick a preset. Browse names in Apple's SF Symbols app. Invalid names fall back to the default icon." = "Enter any SF Symbol name (e.g. camera.fill) or pick a preset. Browse names in Apple's SF Symbols app. Invalid names fall back to the default icon.";
+"Hold Space to move. Release to annotate and edit" = "Hold Space to move. Release to annotate and edit";
+"Hold Space to move. Release to finish" = "Hold Space to move. Release to finish";
+"Rotate Left" = "Rotate Left";
+"Rotate Right" = "Rotate Right";
+"Open With" = "Open With";
+"No Apps Available" = "No Apps Available";
+"No Share Services" = "No Share Services";
 "Liquid Glass theme" = "Liquid Glass theme";
 "Translucent toolbars that show the screen behind them." = "Translucent toolbars that show the screen behind them.";
 "Accent color:" = "Accent color:";
@@ -249,10 +274,14 @@
 "Background color:" = "Background color:";
 "Reset" = "Reset";
 "OCR Capture:" = "OCR Capture:";
+"OCR & QR Capture:" = "OCR & QR Capture:";
 "Show window + copy to clipboard" = "Show window + copy to clipboard";
 "Show window only" = "Show window only";
 "Copy to clipboard only" = "Copy to clipboard only";
 "Enter / Quick Capture:" = "Enter / Quick Capture:";
+"Save action:" = "Save action:";
+"Save to default folder" = "Save to default folder";
+"Ask where to save" = "Ask where to save";
 "Save to file" = "Save to file";
 "Save + copy to clipboard" = "Save + copy to clipboard";
 "OCR Action" = "OCR Action";
@@ -371,6 +400,7 @@
 
 /* OCR Window */
 "Text Recognition" = "Text Recognition";
+"Text & QR Recognition" = "Text & QR Recognition";
 "Translate to:" = "Translate to:";
 "%d chars · %d words" = "%d chars · %d words";
 "Copy  ⌘↩" = "Copy  ⌘↩";
@@ -379,6 +409,9 @@
 "Translation Failed" = "Translation Failed";
 "Translation" = "Translation";
 "(No text detected in the selected area)" = "(No text detected in the selected area)";
+"QR Code" = "QR Code";
+"QR Codes" = "QR Codes";
+"Open Link" = "Open Link";
 
 /* Upload Toast */
 "URL copied to the clipboard" = "URL copied to the clipboard";
@@ -469,6 +502,7 @@
 "Done" = "Done";
 "Do nothing" = "Do nothing";
 "Overlay / Editor Shortcuts" = "Overlay / Editor Shortcuts";
+"Show shortcuts in tooltips" = "Show shortcuts in tooltips";
 "Set" = "Set";
 "Press..." = "Press...";
 "Reset to default" = "Reset to default";
@@ -571,6 +605,7 @@
 /* Settings — shortcuts help text */
 "Application" = "Application";
 "Capture area and extract text" = "Capture area and extract text";
+"Capture area and read text/QR codes" = "Capture area and read text/QR codes";
 "Capture the full screen" = "Capture the full screen";
 "Counter for multi-screen captures" = "Counter for multi-screen captures";
 "8-character random string (e.g. k3j7x9q2)" = "8-character random string (e.g. k3j7x9q2)";
