@@ -134,6 +134,15 @@ class ToolOptionsRowView: NSView, ChromeContent {
             curX = addSeparator(at: curX)
             curX = addLoupeMagnificationSlider(at: curX, ov: ov)
         }
+        if tool == .highlight {
+            curX = addHighlightDimSlider(at: curX, ov: ov)
+            curX = addSeparator(at: curX)
+            curX = addHighlightBorderSegment(at: curX, ov: ov)
+            let totalW = max(curX + padding, 200)
+            contentWidth = totalW
+            frame.size = NSSize(width: totalW, height: rowHeight)
+            return
+        }
 
         // ── Line style (line, pencil, rectangle) ──
         let hasLineStyle = [.line, .pencil, .rectangle, .arrow, .ellipse].contains(tool)
@@ -360,6 +369,67 @@ class ToolOptionsRowView: NSView, ChromeContent {
         addSubview(label)
         curX += 38
 
+        return curX
+    }
+
+    private func addHighlightDimSlider(at x: CGFloat, ov: OverlayView) -> CGFloat {
+        var curX = x
+
+        let nameLabel = NSTextField(labelWithString: L("Dim"))
+        nameLabel.font = NSFont.systemFont(ofSize: 9.5, weight: .medium)
+        nameLabel.textColor = ToolbarLayout.iconColor.withAlphaComponent(0.4)
+        nameLabel.sizeToFit()
+        nameLabel.frame.origin = NSPoint(x: curX, y: (rowHeight - nameLabel.frame.height) / 2)
+        addSubview(nameLabel)
+        curX += nameLabel.frame.width + 4
+
+        let stored = UserDefaults.standard.object(forKey: HighlightToolHandler.dimOpacityKey) as? Double
+        let currentVal = editingAnnotation?.dimOpacity ?? CGFloat(stored ?? 0.55)
+        let sliderW: CGFloat = 84
+        let slider = NSSlider(value: Double(currentVal),
+                              minValue: 0.1, maxValue: 0.95,
+                              target: self, action: #selector(highlightDimChanged(_:)))
+        slider.frame = NSRect(x: curX, y: (rowHeight - 20) / 2, width: sliderW, height: 20)
+        slider.isContinuous = true
+        addSubview(slider)
+        curX += sliderW + 4
+
+        let label = NSTextField(labelWithString: "\(Int((currentVal * 100).rounded()))%")
+        label.font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .medium)
+        label.textColor = ToolbarLayout.iconColor.withAlphaComponent(0.6)
+        label.alignment = .right
+        label.frame = NSRect(x: curX, y: (rowHeight - 14) / 2, width: 38, height: 14)
+        label.tag = 993
+        addSubview(label)
+        curX += 38
+
+        return curX
+    }
+
+    /// Solid | Dashed border-style toggle for the highlight rect.
+    private func addHighlightBorderSegment(at x: CGFloat, ov: OverlayView) -> CGFloat {
+        var curX = x
+        let seg = NSSegmentedControl()
+        seg.segmentCount = 2
+        seg.trackingMode = .selectOne
+        seg.target = self
+        seg.action = #selector(highlightBorderChanged(_:))
+        seg.tag = 992
+        seg.setImage(Self.lineStyleImage(.solid), forSegment: 0)
+        seg.setImage(Self.lineStyleImage(.dashed), forSegment: 1)
+        seg.setWidth(36, forSegment: 0)
+        seg.setWidth(36, forSegment: 1)
+        let dashed: Bool
+        if let ann = editingAnnotation, ann.tool == .highlight {
+            dashed = ann.lineStyle == .dashed
+        } else {
+            dashed = UserDefaults.standard.object(forKey: HighlightToolHandler.dashedBorderKey) as? Bool ?? true
+        }
+        seg.selectedSegment = dashed ? 1 : 0
+        seg.frame = NSRect(x: curX, y: (rowHeight - 22) / 2, width: 72, height: 22)
+        (seg.cell as? NSSegmentedCell)?.segmentStyle = .roundRect
+        addSubview(seg)
+        curX += 72
         return curX
     }
 
@@ -1381,6 +1451,53 @@ class ToolOptionsRowView: NSView, ChromeContent {
         if let label = viewWithTag(994) as? NSTextField {
             label.stringValue = String(format: "%.1fx", val)
         }
+        ov.needsDisplay = true
+    }
+
+    @objc private func highlightDimChanged(_ sender: NSSlider) {
+        guard let ov = overlayView else { return }
+        let val = min(0.95, max(0.1, CGFloat(sender.doubleValue)))
+        if let ann = editingAnnotation, ann.tool == .highlight {
+            // Editing a specific selected highlight.
+            ensureSnapshot()
+            ann.dimOpacity = val
+            ov.cachedCompositedImage = nil
+        } else {
+            // Highlight tool active with no specific selection: the dim is a
+            // single spotlight level, so apply it to every placed highlight live
+            // (not just the next one). Highlight bakes nothing — invalidating the
+            // cache re-renders the union dim at the new strength.
+            var changed = false
+            for ann in ov.annotations where ann.tool == .highlight {
+                ann.dimOpacity = val
+                changed = true
+            }
+            if changed { ov.cachedCompositedImage = nil }
+        }
+        UserDefaults.standard.set(Double(val), forKey: HighlightToolHandler.dimOpacityKey)
+        if let label = viewWithTag(993) as? NSTextField {
+            label.stringValue = "\(Int((val * 100).rounded()))%"
+        }
+        ov.needsDisplay = true
+    }
+
+    @objc private func highlightBorderChanged(_ sender: NSSegmentedControl) {
+        guard let ov = overlayView else { return }
+        let dashed = sender.selectedSegment == 1
+        let style: LineStyle = dashed ? .dashed : .solid
+        if let ann = editingAnnotation, ann.tool == .highlight {
+            ensureSnapshot()
+            ann.lineStyle = style
+            ov.cachedCompositedImage = nil
+        } else {
+            var changed = false
+            for ann in ov.annotations where ann.tool == .highlight {
+                ann.lineStyle = style
+                changed = true
+            }
+            if changed { ov.cachedCompositedImage = nil }
+        }
+        UserDefaults.standard.set(dashed, forKey: HighlightToolHandler.dashedBorderKey)
         ov.needsDisplay = true
     }
 
