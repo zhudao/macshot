@@ -5,7 +5,7 @@ import Cocoa
 /// Two real, separately-editable number fields with a non-editable "×" between
 /// them (so the separator can't be deleted), plus a presets dropdown button for
 /// aspect ratios and common resolutions. Replaces the old drawn "W × H" badge.
-final class ResolutionBoxView: NSView, NSTextFieldDelegate, ChromeContent {
+final class ResolutionBoxView: NSView, NSTextFieldDelegate {
 
     enum EditedDimension {
         case width
@@ -32,12 +32,6 @@ final class ResolutionBoxView: NSView, NSTextFieldDelegate, ChromeContent {
     private let pad: CGFloat = 6
     private let btnW: CGFloat = 30
     private var suppressNextEndEditingCommit = false
-
-    /// When hosted in a Liquid Glass chrome panel, the panel's glass provides the
-    /// background, so the box clears its own solid layer fill (ChromeContent).
-    var hostedInGlassPanel = false {
-        didSet { layer?.backgroundColor = hostedInGlassPanel ? NSColor.clear.cgColor : ToolbarLayout.bgColor.cgColor }
-    }
 
     init() {
         super.init(frame: .zero)
@@ -76,10 +70,16 @@ final class ResolutionBoxView: NSView, NSTextFieldDelegate, ChromeContent {
         f.delegate = self
         f.isEditable = true
         f.isSelectable = true
-        f.isBezeled = true
-        f.bezelStyle = .roundedBezel
-        f.drawsBackground = true
+        // No system bezel/border — they ignore the toolbar theme. Draw a themed
+        // rounded background via the field's own layer instead (derived from
+        // iconColor so it adapts to the user's toolbar colors / light & dark).
+        f.isBezeled = false
+        f.isBordered = false
+        f.drawsBackground = false
         f.focusRingType = .none
+        f.wantsLayer = true
+        f.layer?.cornerRadius = 5
+        f.layer?.backgroundColor = ToolbarLayout.iconColor.withAlphaComponent(0.12).cgColor
         f.formatter = ResolutionBoxView.intFormatter()
         addSubview(f)
     }
@@ -212,16 +212,44 @@ final class ResolutionBoxView: NSView, NSTextFieldDelegate, ChromeContent {
     }
 }
 
+/// Vertically centers the text within a non-bezeled field (and its field editor),
+/// so the digits sit in the middle of the themed background instead of the top.
+private final class VCenterTextFieldCell: NSTextFieldCell {
+    private func centered(_ rect: NSRect) -> NSRect {
+        let textHeight = cellSize(forBounds: rect).height
+        guard textHeight < rect.height else { return rect }
+        let dy = (rect.height - textHeight) / 2
+        return NSRect(x: rect.minX, y: rect.minY + dy, width: rect.width, height: textHeight)
+    }
+    override func drawingRect(forBounds rect: NSRect) -> NSRect {
+        super.drawingRect(forBounds: centered(rect))
+    }
+    override func edit(withFrame rect: NSRect, in controlView: NSView, editor: NSText,
+                       delegate: Any?, event: NSEvent?) {
+        super.edit(withFrame: centered(rect), in: controlView, editor: editor,
+                   delegate: delegate, event: event)
+    }
+    override func select(withFrame rect: NSRect, in controlView: NSView, editor: NSText,
+                         delegate: Any?, start: Int, length: Int) {
+        super.select(withFrame: centered(rect), in: controlView, editor: editor,
+                     delegate: delegate, start: start, length: length)
+    }
+}
+
 /// A number field may enter editing from a direct mouse click, without becoming
 /// a stray first responder during overlay keyboard handling.
-private final class ResolutionNumberField: NSTextField, PanelKeyRequestingView {
+private final class ResolutionNumberField: NSTextField {
     private var acceptingMouseFocus = false
-    var requestsPanelKeyForMouseDown: Bool { true }
 
-    // The field lives inside a borderless, non-activating glass child panel. For
-    // AppKit to install a field editor there, the field must advertise that it
-    // needs the panel to become key — otherwise clicks focus it inconsistently
-    // and typing beeps.
+    override class var cellClass: AnyClass? {
+        get { VCenterTextFieldCell.self }
+        set {}
+    }
+
+    // The field lives in a borderless, non-activating overlay window. For AppKit
+    // to install a field editor there, the field must advertise that it needs the
+    // window to become key — otherwise clicks focus it inconsistently and typing
+    // beeps.
     override var needsPanelToBecomeKey: Bool { true }
 
     override var acceptsFirstResponder: Bool {
