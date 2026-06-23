@@ -100,6 +100,13 @@ class OverlayView: NSView {
             cachedCompositedImage = nil
             cachedEffectsScreenshot = nil
             cachedOpaqueRect = nil
+            // Load the custom beautify background at session start. reset() only
+            // runs at session teardown, so the FIRST capture of a freshly-created
+            // pooled controller would otherwise render with no custom background
+            // (and fall through to a gradient) if beautify was left on with the
+            // custom-image style. The beautifyConfig getter is now side-effect-free,
+            // so this must be done eagerly. Idempotent.
+            if screenshotImage != nil { ensureCustomBeautifyBackgroundLoaded() }
             if captureSourceImage != nil {
                 captureSourceImage = screenshotImage
             }
@@ -191,8 +198,17 @@ class OverlayView: NSView {
             if showToolbars { rebuildToolbarLayout() }
         }
     }
-    var undoStack: [UndoEntry] = []
+    var undoStack: [UndoEntry] = [] {
+        didSet {
+            // Every annotation/image edit mutates the undo stack — notify so the
+            // editor can show/hide its "Done" button based on dirty state.
+            if undoStack.count != oldValue.count { onContentChanged?() }
+        }
+    }
     var redoStack: [UndoEntry] = []
+    /// Fired when editable content changes (undo stack, or beautify/effects).
+    /// The detached editor uses this to reveal "Done" only once there's an edit.
+    var onContentChanged: (() -> Void)?
     private var currentAnnotation: Annotation?
     /// Whether the user is actively drawing/dragging a new annotation.
     var isActivelyDrawing: Bool { currentAnnotation != nil }
@@ -344,6 +360,9 @@ class OverlayView: NSView {
     }
     private var isDraggingAnnotation: Bool = false
     private var didMoveAnnotation: Bool = false
+    /// Pre-move clones of the annotations being dragged, captured on the first
+    /// move so the drag can be pushed as an undo entry (and counts as an edit).
+    private var preMoveSnapshots: [(annotation: Annotation, snapshot: Annotation)] = []
     private var annotationDragStart: NSPoint = .zero
     /// Two-circle loupe: dragging the small SOURCE circle (re-roots what's
     /// magnified) independently of the lens.
@@ -456,15 +475,22 @@ class OverlayView: NSView {
         cachedBeautifyBgCGImage = cfg.cachedBackgroundCGImage
     }
 
-    var beautifyConfig: BeautifyConfig {
-        // Lazy-load custom background from UserDefaults if needed
-        if beautifyStyleIndex == -1 && customBeautifyBackground == nil {
-            if let data = UserDefaults.standard.data(forKey: "beautifyCustomBgImageData"),
-               let img = NSImage(data: data) {
-                customBeautifyBackground = img
-                prepareBeautifyBackgroundCache()
-            }
+    /// Load the custom beautify background from UserDefaults if the custom style
+    /// is selected but the image isn't in memory yet. MUST be called explicitly
+    /// (not from the `beautifyConfig` getter) — a getter that mutates state caused
+    /// the editor's "Save changes?" prompt to fire on reopen even with no edits,
+    /// because the lazy load changed `customBeautifyBackground` after the editor's
+    /// clean-state signature was captured. Safe to call repeatedly.
+    func ensureCustomBeautifyBackgroundLoaded() {
+        guard beautifyStyleIndex == -1, customBeautifyBackground == nil else { return }
+        if let data = UserDefaults.standard.data(forKey: "beautifyCustomBgImageData"),
+           let img = NSImage(data: data) {
+            customBeautifyBackground = img
+            prepareBeautifyBackgroundCache()
         }
+    }
+
+    var beautifyConfig: BeautifyConfig {
         return BeautifyConfig(
             mode: beautifyMode,
             styleIndex: beautifyStyleIndex,
@@ -650,6 +676,9 @@ class OverlayView: NSView {
     private var hoveredTooltip: String?
     private var hoveredTooltipButtonView: ToolbarButtonView?
     private var isToolbarMoveDragActive = false
+    private var isKeyboardMoveSelectionActive = false
+    private var keyboardMoveSelectionOffset: NSPoint = .zero
+    private var keyboardMoveSelectionShortcut: String = ""
 
     private var currentCanvasMousePoint: NSPoint? {
         guard let windowPoint = window?.mouseLocationOutsideOfEventStream else { return nil }
@@ -1038,6 +1067,12 @@ class OverlayView: NSView {
         // the snap fallback in mouseUp still apply when the user commits.
         if isAnchoredSelecting {
             updateAnchoredSelection(to: point, event: event)
+            updateCursorForPoint(point)
+            return
+        }
+
+        if isKeyboardMoveSelectionActive {
+            updateKeyboardMoveSelection(to: point, modifiers: event.modifierFlags)
             updateCursorForPoint(point)
             return
         }
@@ -2462,6 +2497,47 @@ class OverlayView: NSView {
         }?.label
     }
 
+    /// True if a non-nil locked aspect doesn't match any named ratio preset —
+    /// i.e. it's a custom ratio (e.g. locked from a typed W×H).
+    private var lockedAspectIsCustom: Bool {
+        guard let a = lockedAspect, a > 0 else { return false }
+        return !ResolutionPresetCatalog.ratios.contains {
+            if case .ratio(_, let v) = $0 { return abs(v - a) < 0.001 }
+            return false
+        }
+    }
+
+    /// A compact aspect-ratio label that always fits the popover column. Uses a
+    /// small reduced "W : H" only when it reduces cleanly to short numbers
+    /// (e.g. 16 : 9, 3 : 1); otherwise a short decimal like "1.62 : 1". Never
+    /// shows raw multi-digit pixel dims (which overflowed the column).
+    private func ratioLabel(for aspect: CGFloat) -> String {
+        guard aspect > 0 else { return "—" }
+        let px = selectionPixelSize
+        if px.w > 0, px.h > 0, abs(CGFloat(px.w) / CGFloat(px.h) - aspect) < 0.01 {
+            let g = Self.gcd(px.w, px.h)
+            let rw = px.w / g, rh = px.h / g
+            if rw <= 32 && rh <= 32 { return "\(rw) : \(rh)" }
+        }
+        // Decimal fallback — compact and bounded width.
+        if abs(aspect.rounded() - aspect) < 0.001 { return "\(Int(aspect.rounded())) : 1" }
+        return String(format: "%.2f : 1", aspect)
+    }
+
+    private static func gcd(_ a: Int, _ b: Int) -> Int {
+        var a = abs(a), b = abs(b)
+        while b != 0 { (a, b) = (b, a % b) }
+        return max(a, 1)
+    }
+
+    /// The current selection's aspect ratio (w/h) in pixel space, or nil when
+    /// there's no usable selection.
+    private var currentSelectionAspect: CGFloat? {
+        let px = selectionPixelSize
+        guard px.w > 0, px.h > 0 else { return nil }
+        return CGFloat(px.w) / CGFloat(px.h)
+    }
+
     /// Toggle the presets popover (aspect ratios + common resolutions) from `anchor`.
     private func showResolutionPresets(from anchor: NSView) {
         // Clicking the button while the popover is open should close it.
@@ -2469,8 +2545,11 @@ class OverlayView: NSView {
         let activePreset = activePreSelectionPreset
         let view = ResolutionPresetsView()
 
-        view.ratioRows = ResolutionPresetCatalog.ratios.map { preset in
-            let selected = preSelectionPreset(activePreset, selects: preset)
+        let customLocked = lockedAspectIsCustom
+        var ratioRows = ResolutionPresetCatalog.ratios.map { preset -> ResolutionPresetsView.Row in
+            // When a custom ratio is locked, no named preset (including Freeform)
+            // is the active one — the Custom row owns the checkmark.
+            let selected = !customLocked && preSelectionPreset(activePreset, selects: preset)
             return ResolutionPresetsView.Row(title: preset.label, isSelected: selected) { [weak self] in
                 PopoverHelper.dismiss()
                 guard let self else { return }
@@ -2491,6 +2570,33 @@ class OverlayView: NSView {
                 self.persistRatioIfNeeded()
             }
         }
+
+        // "Custom" row: lock the CURRENT selection's aspect ratio (e.g. one you
+        // just set by typing W and H). Shows the live ratio and is checked when a
+        // non-preset ratio is locked. Lets you resize while keeping that ratio.
+        if let curAspect = currentSelectionAspect {
+            let customSelected = customLocked
+            let customTitle = customSelected
+                ? String(format: L("Custom · %@"), ratioLabel(for: lockedAspect ?? curAspect))
+                : String(format: L("Custom · %@"), ratioLabel(for: curAspect))
+            let customRow = ResolutionPresetsView.Row(title: customTitle, isSelected: customSelected) { [weak self] in
+                PopoverHelper.dismiss()
+                guard let self else { return }
+                let aspect = self.currentSelectionAspect ?? curAspect
+                // Persist for the next capture only when keep-ratio is on.
+                if self.keepRatioForNextCaptures {
+                    self.setPreSelectionPreset(.ratio(aspect))
+                } else {
+                    self.setPreSelectionPreset(.freeform)
+                }
+                self.applyLockedAspect(aspect)
+                self.persistRatioIfNeeded()
+            }
+            // Place Custom right after Freeform (index 0) so it sits at the top
+            // of the real ratios.
+            ratioRows.insert(customRow, at: 1)
+        }
+        view.ratioRows = ratioRows
         view.resolutionRows = ResolutionPresetCatalog.resolutions.map { preset in
             guard case .resolution(_, let w, let h) = preset else {
                 return ResolutionPresetsView.Row(title: preset.label, isSelected: false, action: {})
@@ -2561,12 +2667,18 @@ class OverlayView: NSView {
     private var preSelectionPresetDisplayLabel: String? {
         switch activePreSelectionPreset {
         case .freeform:
+            // A custom ratio can be locked for the current selection even when
+            // it isn't persisted for the next capture (keep-ratio off). Surface
+            // it so the box/button still shows the active lock.
+            if lockedAspectIsCustom, let a = lockedAspect {
+                return ratioLabel(for: a)
+            }
             return nil
         case .ratio(let aspect):
             return ResolutionPresetCatalog.ratios.first {
                 if case .ratio(_, let value) = $0 { return abs(value - aspect) < 0.001 }
                 return false
-            }?.label ?? String(format: "%.2f : 1", aspect)
+            }?.label ?? ratioLabel(for: aspect)
         case .resolution(let w, let h):
             return ResolutionPresetCatalog.resolutions.first {
                 if case .resolution(_, let presetW, let presetH) = $0 {
@@ -6030,6 +6142,12 @@ class OverlayView: NSView {
                 cachedCompositedImage = nil
                 needsDisplay = true
             } else if isDraggingAnnotation, !selectedAnnotations.isEmpty {
+                // Snapshot the pre-move state once, on the first actual move, so
+                // the drag can be recorded as an undo entry on mouseUp (which also
+                // makes "move existing shape" register as an edit).
+                if !didMoveAnnotation {
+                    preMoveSnapshots = selectedAnnotations.map { ($0, $0.clone()) }
+                }
                 let rawDx = canvasPoint.x - annotationDragStart.x
                 let rawDy = canvasPoint.y - annotationDragStart.y
                 // For single selection, apply snap; for multi, just move raw
@@ -6151,6 +6269,7 @@ class OverlayView: NSView {
         }
         if isRotatingAnnotation {
             isRotatingAnnotation = false
+            commitAnnotationManipulationUndo()
             cachedAnnotationLayerExcludingSelected = nil
             cachedAnnotationLayer = nil
             NSCursor.openHand.set()
@@ -6161,6 +6280,7 @@ class OverlayView: NSView {
             let wasResize = isResizingLoupeSource
             isDraggingLoupeSource = false
             isResizingLoupeSource = false
+            commitAnnotationManipulationUndo()
             cachedAnnotationLayerExcludingSelected = nil
             cachedAnnotationLayer = nil
             if let ann = selectedAnnotation, ann.tool == .loupe {
@@ -6178,6 +6298,7 @@ class OverlayView: NSView {
         }
         if isResizingAnnotation {
             isResizingAnnotation = false
+            commitAnnotationManipulationUndo()
             cachedAnnotationLayerExcludingSelected = nil
             cachedAnnotationLayer = nil
             annotationResizeHandle = .none
@@ -6218,6 +6339,9 @@ class OverlayView: NSView {
                         }
                     }
                 }
+                // Record the move as an undo entry (and an edit) if anything
+                // actually moved. Each dragged annotation gets its own entry.
+                commitAnnotationManipulationUndo()
                 isDraggingAnnotation = false
                 didMoveAnnotation = false
                 cachedAnnotationLayerExcludingSelected = nil
@@ -7053,6 +7177,115 @@ class OverlayView: NSView {
         needsDisplay = true
     }
 
+    private func moveSelectionButtonView() -> ToolbarButtonView? {
+        rightStripView?.buttonViews.first {
+            if case .moveSelection = $0.action { return true }
+            return false
+        }
+    }
+
+    private func eventMatchesToolShortcut(_ event: NSEvent, action: ToolShortcutManager.Action) -> Bool {
+        guard !event.modifierFlags.contains(.command),
+              !event.modifierFlags.contains(.option),
+              !event.modifierFlags.contains(.control),
+              let char = event.charactersIgnoringModifiers?.lowercased()
+        else { return false }
+        let shortcut = ToolShortcutManager.key(for: action).lowercased()
+        return !shortcut.isEmpty && char == shortcut
+    }
+
+    private func eventEndsKeyboardMoveSelection(_ event: NSEvent) -> Bool {
+        if keyboardMoveSelectionShortcut == " " {
+            return event.keyCode == 49
+        }
+        guard let char = event.charactersIgnoringModifiers?.lowercased() else { return false }
+        return !keyboardMoveSelectionShortcut.isEmpty && char == keyboardMoveSelectionShortcut
+    }
+
+    private func canStartKeyboardMoveSelection() -> Bool {
+        state == .selected
+            && !isEditorMode
+            && textEditView == nil
+            && !isRecording
+            && !isScrollCapturing
+            && !isAnchoredSelecting
+            && !isResizingSelection
+            && !isDraggingSelection
+            && currentAnnotation == nil
+            && !isDraggingAnnotation
+            && !isResizingAnnotation
+            && !isRotatingAnnotation
+            && !isCropDragging
+            && !isResizingTextBox
+            && !PopoverHelper.isVisible
+    }
+
+    @discardableResult
+    private func startKeyboardMoveSelection() -> Bool {
+        guard canStartKeyboardMoveSelection(), let win = window else { return false }
+        var moveButton = moveSelectionButtonView()
+
+        isKeyboardMoveSelectionActive = true
+        isToolbarMoveDragActive = true
+        keyboardMoveSelectionShortcut = ToolShortcutManager.key(for: .moveSelection).lowercased()
+        setToolbarHoverSuppressed(true)
+        clearToolbarHoverState(suppressUntilMouseMoved: true, clearPressed: false)
+
+        if selectionIsWindowSnap {
+            selectionIsWindowSnap = false
+            snappedWindowID = nil
+            snappedWindowImage = nil
+            rebuildToolbarLayout()
+            setToolbarHoverSuppressed(true)
+            moveButton = moveSelectionButtonView()
+        }
+
+        let point = convert(win.mouseLocationOutsideOfEventStream, from: nil)
+        keyboardMoveSelectionOffset = NSPoint(
+            x: point.x - selectionRect.origin.x,
+            y: point.y - selectionRect.origin.y)
+
+        moveButton?.isPressed = true
+        moveButton?.needsDisplay = true
+        moveButton?.displayIfNeeded()
+        showMoveDragTooltip(anchor: moveButton)
+        needsDisplay = true
+        return true
+    }
+
+    private func updateKeyboardMoveSelection(to point: NSPoint, modifiers: NSEvent.ModifierFlags) {
+        guard isKeyboardMoveSelectionActive else { return }
+        var moved = selectionRect
+        moved.origin = NSPoint(
+            x: point.x - keyboardMoveSelectionOffset.x,
+            y: point.y - keyboardMoveSelectionOffset.y)
+        selectionRect = boundarySnappedMovedRect(moved, modifiers: modifiers)
+        if webcamSetupPreview != nil { repositionWebcamSetupPreview() }
+        updateResolutionBox()
+        repositionToolbars()
+        showMoveDragTooltip(anchor: moveSelectionButtonView())
+        needsDisplay = true
+    }
+
+    private func endKeyboardMoveSelection() {
+        guard isKeyboardMoveSelectionActive else { return }
+        isKeyboardMoveSelectionActive = false
+        keyboardMoveSelectionShortcut = ""
+        boundarySnapGuideX = nil
+        boundarySnapGuideY = nil
+        let moveButton = moveSelectionButtonView()
+        moveButton?.isPressed = false
+        moveButton?.needsDisplay = true
+        moveButton?.displayIfNeeded()
+        clearToolbarHoverState(suppressUntilMouseMoved: true)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.clearToolbarHoverState(suppressUntilMouseMoved: true)
+            self.setToolbarHoverSuppressed(false)
+            self.isToolbarMoveDragActive = false
+        }
+    }
+
     private func setToolbarHoverSuppressed(_ suppressed: Bool) {
         bottomStripView?.suppressesHover = suppressed
         rightStripView?.suppressesHover = suppressed
@@ -7676,6 +7909,9 @@ class OverlayView: NSView {
                 UserDefaults.standard.set(true, forKey: "beautifyEnabled")
                 startBeautifyToolbarAnimation()
             }
+            // Load the custom background eagerly if that style is selected (the
+            // beautifyConfig getter no longer does this as a side effect).
+            ensureCustomBeautifyBackgroundLoaded()
             showBeautifyInOptionsRow = true
             needsDisplay = true
         case .beautifyStyle:
@@ -7910,6 +8146,7 @@ class OverlayView: NSView {
                     if onSource && !onLens {
                         isDraggingLoupeSource = true
                         didMoveAnnotation = false
+                        preMoveSnapshots = [(clicked, clicked.clone())]
                         loupeSourceDragStart = point
                         loupeSourceDragOrig = src
                         cachedAnnotationLayerExcludingSelected = buildAnnotationLayer(excluding: Set(selectedAnnotations.map { ObjectIdentifier($0) }))
@@ -8085,6 +8322,7 @@ class OverlayView: NSView {
            loupeSourceHandleRect.insetBy(dx: -6, dy: -6).contains(point) {
             isResizingLoupeSource = true
             didMoveAnnotation = false
+            preMoveSnapshots = [(selected, selected.clone())]
             loupeSourceDragStart = point
             loupeSourceDragOrig = selected.loupeSourceRect ?? .zero
             cachedAnnotationLayerExcludingSelected = buildAnnotationLayer(excluding: Set(selectedAnnotations.map { ObjectIdentifier($0) }))
@@ -8097,6 +8335,8 @@ class OverlayView: NSView {
             let (handle, rect) = handleEntry
             if rect.insetBy(dx: -4, dy: -4).contains(handleTestPoint) {
                 isResizingAnnotation = true
+                // Snapshot for undo + change detection (resize records an edit).
+                preMoveSnapshots = [(selected, selected.clone())]
                 // Build cache of non-selected annotations for fast resize rendering
                 cachedAnnotationLayerExcludingSelected = buildAnnotationLayer(excluding: Set(selectedAnnotations.map { ObjectIdentifier($0) }))
                 annotationResizeHandle = handle
@@ -8131,6 +8371,8 @@ class OverlayView: NSView {
             && annotationRotateHandleRect.insetBy(dx: -6, dy: -6).contains(point)
         {
             isRotatingAnnotation = true
+            // Snapshot for undo + change detection (rotate records an edit).
+            preMoveSnapshots = [(selected, selected.clone())]
             cachedAnnotationLayerExcludingSelected = buildAnnotationLayer(excluding: Set(selectedAnnotations.map { ObjectIdentifier($0) }))
             let center = NSPoint(x: selected.boundingRect.midX, y: selected.boundingRect.midY)
             rotationStartAngle = atan2(point.x - center.x, point.y - center.y)
@@ -8600,6 +8842,12 @@ class OverlayView: NSView {
                     return
                 }
             }
+            if eventMatchesToolShortcut(event, action: .moveSelection) {
+                if !isKeyboardMoveSelectionActive {
+                    _ = startKeyboardMoveSelection()
+                }
+                return
+            }
             return
         }
 
@@ -8688,6 +8936,10 @@ class OverlayView: NSView {
                 if let char = event.charactersIgnoringModifiers?.lowercased(),
                    let action = ToolShortcutManager.lookupAction(for: char) {
                     switch action {
+                    case .moveSelection:
+                        if !isKeyboardMoveSelectionActive {
+                            _ = startKeyboardMoveSelection()
+                        }
                     case .detach:
                         if shouldAllowDetach() { handleToolbarAction(.detach) }
                     case .pin, .scrollCapture:
@@ -8754,6 +9006,10 @@ class OverlayView: NSView {
     }
 
     override func keyUp(with event: NSEvent) {
+        if isKeyboardMoveSelectionActive && eventEndsKeyboardMoveSelection(event) {
+            endKeyboardMoveSelection()
+            return
+        }
         if event.keyCode == 49 && spaceRepositioning {
             spaceRepositioning = false
             return
@@ -8822,6 +9078,38 @@ class OverlayView: NSView {
         }
         addCaptureImage(image)
         return true
+    }
+
+    /// Push undo entries for a finished drag/resize/rotate manipulation, but only
+    /// for annotations whose geometry actually changed vs the pre-manipulation
+    /// snapshot. Recording these makes such edits undoable AND makes them count as
+    /// a change (so the editor shows "Done" and prompts on close).
+    private func commitAnnotationManipulationUndo() {
+        guard !preMoveSnapshots.isEmpty else { return }
+        var pushed = false
+        for (ann, snapshot) in preMoveSnapshots where Self.annotationGeometryChanged(ann, snapshot) {
+            undoStack.append(.propertyChange(annotation: ann, snapshot: snapshot))
+            pushed = true
+        }
+        preMoveSnapshots = []
+        if pushed {
+            redoStack.removeAll()
+            cachedCompositedImage = nil
+        }
+    }
+
+    /// Whether two annotations differ in position/size/rotation (the things a
+    /// drag/resize/rotate changes).
+    private static func annotationGeometryChanged(_ a: Annotation, _ b: Annotation) -> Bool {
+        if a.startPoint != b.startPoint || a.endPoint != b.endPoint { return true }
+        if abs(a.rotation - b.rotation) > 0.0001 { return true }
+        if a.controlPoint != b.controlPoint { return true }
+        if (a.points ?? []) != (b.points ?? []) { return true }
+        if (a.anchorPoints ?? []) != (b.anchorPoints ?? []) { return true }
+        if a.textDrawRect != b.textDrawRect { return true }
+        if a.loupeSourceRect != b.loupeSourceRect { return true }
+        if abs(a.loupeMagnification - b.loupeMagnification) > 0.0001 { return true }
+        return false
     }
 
     // MARK: - Undo/Redo
@@ -9437,6 +9725,9 @@ class OverlayView: NSView {
         autoMeasurePreview = nil
         autoMeasureKeyHeld = false
         autoMeasureBitmapCtx = nil
+        isKeyboardMoveSelectionActive = false
+        isToolbarMoveDragActive = false
+        keyboardMoveSelectionShortcut = ""
         selectedAnnotation = nil
         isDraggingAnnotation = false
         hoveredAnnotationClearTimer?.invalidate()
@@ -9455,6 +9746,10 @@ class OverlayView: NSView {
             UserDefaults.standard.object(forKey: "beautifyShadowRadius") as? Double ?? 20)
         beautifyBgRadius = CGFloat(
             UserDefaults.standard.object(forKey: "beautifyBgRadius") as? Double ?? 8)
+        // The custom-style background is loaded here (not lazily in the
+        // beautifyConfig getter) so reads during draw never mutate state.
+        customBeautifyBackground = nil
+        ensureCustomBeautifyBackgroundLoaded()
         currentLineStyle =
             LineStyle(rawValue: UserDefaults.standard.integer(forKey: "currentLineStyle")) ?? .solid
         currentArrowStyle =
