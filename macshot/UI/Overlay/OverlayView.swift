@@ -1700,6 +1700,7 @@ class OverlayView: NSView {
 
             // Skip annotation drawing if the editor already drew them via the cached composite.
             let editorDrawnFromCache = (self as? EditorView)?.drewFromCompositeCache ?? false
+            let drawingHighlightPreview = currentAnnotation?.tool == .highlight
 
             if !editorDrawnFromCache {
                 // Use cached annotation layer whenever possible — even during active
@@ -1721,15 +1722,16 @@ class OverlayView: NSView {
                         for annotation in selectedAnnotations {
                             annotation.draw(in: context)
                         }
-                    } else if currentAnnotation?.tool == .highlight {
-                        // Drawing a NEW highlight: render committed annotations
-                        // WITHOUT their dim, then draw one union dim live below
-                        // (committed + in-progress) so previously placed highlights
-                        // stay bright instead of being re-dimmed by the preview.
-                        let layer = renderAnnotationBitmap(annotations: annotations, skipHighlightDim: true)
+                    } else if drawingHighlightPreview {
+                        // Drawing a NEW highlight: draw only pre-dim effects here.
+                        // The live union dim and all annotation borders are drawn
+                        // below in final render order so existing highlight borders
+                        // do not appear thinner while dragging.
                         context.saveGraphicsState()
                         applyCanvasTransform(to: context)
-                        layer.draw(in: bounds, from: .zero, operation: .sourceOver, fraction: 1.0)
+                        for annotation in annotations where annotation.tool == .pixelate {
+                            annotation.draw(in: context)
+                        }
                     } else {
                         let layer = annotationLayerImage()
                         context.saveGraphicsState()
@@ -1759,12 +1761,15 @@ class OverlayView: NSView {
                     // being drawn — it's drawn live below over the full union
                     // (committed + in-progress) so the existing ones don't get
                     // re-dimmed by the preview pass.
-                    if !(currentAnnotation?.tool == .highlight) {
+                    if !drawingHighlightPreview {
                         Annotation.drawHighlightDim(for: annotations, in: highlightDimBounds)
+                        for annotation in annotations where annotation.tool != .translateOverlay && annotation.tool != .pixelate {
+                            annotation.draw(in: context)
+                        }
                     }
-                    for annotation in annotations where annotation.tool != .translateOverlay && annotation.tool != .pixelate {
-                        annotation.draw(in: context)
-                    }
+                } else {
+                    context.saveGraphicsState()
+                    applyCanvasTransform(to: context)
                 }
             } else {
                 // Still need the canvas transform for active drawing and overlays below
@@ -1776,6 +1781,10 @@ class OverlayView: NSView {
             // previously-placed highlights stay bright instead of being re-dimmed.
             if let cur = currentAnnotation, cur.tool == .highlight {
                 Annotation.drawHighlightDim(for: annotations, extra: cur, in: highlightDimBounds)
+                for annotation in annotations where annotation.tool != .pixelate {
+                    if isEditorMode && annotation.tool == .translateOverlay { continue }
+                    annotation.draw(in: context)
+                }
             }
             currentAnnotation?.draw(in: context)
             autoMeasurePreview?.draw(in: context)
@@ -7446,8 +7455,10 @@ class OverlayView: NSView {
             menu.popUp(
                 positioning: nil, at: NSPoint(x: 0, y: anchorView.bounds.height), in: anchorView)
         case .upload:
+            #if !CORPORATE
             showUploadConfirmPopover(
                 anchorRect: anchorView.convert(anchorView.bounds, to: self), anchorView: anchorView)
+            #endif
         case .translate:
             showTranslatePopover(
                 anchorRect: anchorView.convert(anchorView.bounds, to: self), anchorView: anchorView)
@@ -7854,6 +7865,7 @@ class OverlayView: NSView {
         case .save:
             overlayDelegate?.overlayViewDidRequestSave()
         case .upload:
+            #if !CORPORATE
             let confirmEnabled = UserDefaults.standard.bool(forKey: "uploadConfirmEnabled")
             if confirmEnabled {
                 let provider = UserDefaults.standard.string(forKey: "uploadProvider") ?? "imgbb"
@@ -7880,6 +7892,7 @@ class OverlayView: NSView {
             } else {
                 overlayDelegate?.overlayViewDidRequestUpload()
             }
+            #endif
         case .share:
             // Show share picker anchored to the share button, then dismiss on selection
             let shareBtn = rightStripView?.buttonViews.first { if case .share = $0.action { return true }; return false }
