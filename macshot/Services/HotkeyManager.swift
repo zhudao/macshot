@@ -22,6 +22,7 @@ class HotkeyManager {
         case captureLastArea = 10
         case pinFromClipboard = 11
         case clearHistory = 12
+        case recordGIF = 13
 
         var keyCodeKey: String {
             switch self {
@@ -37,6 +38,7 @@ class HotkeyManager {
             case .captureLastArea: return "hotkeyCaptureLastAreaKeyCode"
             case .pinFromClipboard: return "hotkeyPinClipboardKeyCode"
             case .clearHistory: return "hotkeyClearHistoryKeyCode"
+            case .recordGIF: return "hotkeyRecordGIFKeyCode"
             }
         }
 
@@ -54,6 +56,7 @@ class HotkeyManager {
             case .captureLastArea: return "hotkeyCaptureLastAreaModifiers"
             case .pinFromClipboard: return "hotkeyPinClipboardModifiers"
             case .clearHistory: return "hotkeyClearHistoryModifiers"
+            case .recordGIF: return "hotkeyRecordGIFModifiers"
             }
         }
 
@@ -75,6 +78,7 @@ class HotkeyManager {
             case .captureLastArea: return L("Capture Last Area")
             case .pinFromClipboard: return L("Pin from Clipboard")
             case .clearHistory: return L("Clear History")
+            case .recordGIF: return "\(L("Record")) \(L("GIF"))"
             }
         }
 
@@ -92,12 +96,13 @@ class HotkeyManager {
             case .captureLastArea: return 0    // no default hotkey
             case .pinFromClipboard: return 0    // no default hotkey
             case .clearHistory: return 0        // no default hotkey
+            case .recordGIF: return 0           // no default hotkey
             }
         }
 
         var defaultModifiers: UInt32 {
             switch self {
-            case .recordScreen, .scrollCapture, .openFromClipboard, .captureLastArea, .pinFromClipboard, .clearHistory: return 0
+            case .recordScreen, .scrollCapture, .openFromClipboard, .captureLastArea, .pinFromClipboard, .clearHistory, .recordGIF: return 0
             default: return UInt32(cmdKey | shiftKey)
             }
         }
@@ -136,7 +141,7 @@ class HotkeyManager {
     }
 
     /// Register all hotkeys with their callbacks.
-    func registerAll(captureArea: @escaping () -> Void, captureFullScreen: @escaping () -> Void, recordArea: @escaping () -> Void, recordScreen: @escaping () -> Void, historyOverlay: @escaping () -> Void, captureOCR: @escaping () -> Void, quickCapture: @escaping () -> Void, scrollCapture: @escaping () -> Void, openFromClipboard: @escaping () -> Void, captureLastArea: @escaping () -> Void, pinFromClipboard: @escaping () -> Void, clearHistory: @escaping () -> Void) {
+    func registerAll(captureArea: @escaping () -> Void, captureFullScreen: @escaping () -> Void, recordArea: @escaping () -> Void, recordScreen: @escaping () -> Void, historyOverlay: @escaping () -> Void, captureOCR: @escaping () -> Void, quickCapture: @escaping () -> Void, scrollCapture: @escaping () -> Void, openFromClipboard: @escaping () -> Void, captureLastArea: @escaping () -> Void, pinFromClipboard: @escaping () -> Void, clearHistory: @escaping () -> Void, recordGIF: @escaping () -> Void) {
         unregisterAll()
         register(slot: .captureArea, callback: captureArea)
         register(slot: .captureFullScreen, callback: captureFullScreen)
@@ -150,6 +155,7 @@ class HotkeyManager {
         register(slot: .captureLastArea, callback: captureLastArea)
         register(slot: .pinFromClipboard, callback: pinFromClipboard)
         register(slot: .clearHistory, callback: clearHistory)
+        register(slot: .recordGIF, callback: recordGIF)
     }
 
     private func installEventHandler() {
@@ -286,7 +292,7 @@ class HotkeyManager {
         // Character keys: a virtual keycode identifies a physical key position,
         // and on Dvorak/Colemak/etc. that position types a different character
         // than on QWERTY — so the display must go through the active layout.
-        if let translated = layoutCharacter(for: keyCode) {
+        if let translated = KeyboardShortcutMatcher.currentLayoutCharacter(for: keyCode) {
             // Uppercase for display, but only when it doesn't change length
             // ("ß".uppercased() == "SS" — keep the original there).
             let upper = translated.uppercased()
@@ -315,26 +321,6 @@ class HotkeyManager {
 
     /// Character produced by `keyCode` under the current keyboard layout, or
     /// nil when the layout has no printable mapping for it.
-    private static func layoutCharacter(for keyCode: UInt32) -> String? {
-        guard let inputSource = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue(),
-              let layoutPtr = TISGetInputSourceProperty(inputSource, kTISPropertyUnicodeKeyLayoutData) else { return nil }
-        let layoutData = Unmanaged<CFData>.fromOpaque(layoutPtr).takeUnretainedValue() as Data
-        var deadKeyState: UInt32 = 0
-        var chars = [UniChar](repeating: 0, count: 4)
-        var length: Int = 0
-        layoutData.withUnsafeBytes { rawBuf in
-            guard let ptr = rawBuf.baseAddress?.assumingMemoryBound(to: UCKeyboardLayout.self) else { return }
-            UCKeyTranslate(ptr, UInt16(keyCode), UInt16(kUCKeyActionDown), 0, UInt32(LMGetKbdType()),
-                           UInt32(kUCKeyTranslateNoDeadKeysBit), &deadKeyState, 4, &length, &chars)
-        }
-        guard length > 0 else { return nil }
-        let str = String(utf16CodeUnits: chars, count: length)
-        guard !str.isEmpty, str != "\0",
-              str.rangeOfCharacter(from: .controlCharacters) == nil,
-              str.rangeOfCharacter(from: .whitespacesAndNewlines) == nil else { return nil }
-        return str
-    }
-
     /// NSMenuItem-compatible Unicode character for special keys that can't
     /// simply be lowercased from keyString(). Letters and digits are handled
     /// by lowercasing keyString() directly.
@@ -367,7 +353,7 @@ class HotkeyManager {
         let key: String
         if let special = menuKeyCharMap[keyCode] {
             key = special
-        } else if let raw = layoutCharacter(for: keyCode), raw.count == 1 {
+        } else if let raw = KeyboardShortcutMatcher.currentLayoutCharacter(for: keyCode), raw.count == 1 {
             key = raw.lowercased()
         } else {
             let display = keyString(from: keyCode)
@@ -388,6 +374,10 @@ class HotkeyManager {
     /// Apply the configured hotkey for a slot to an NSMenuItem (if one is set).
     static func applyMenuShortcut(for slot: HotkeySlot, to item: NSMenuItem) {
         if let equiv = menuKeyEquivalent(for: slot) {
+            // This shortcut is stored as a physical Carbon key code and has
+            // already been translated for the active layout. Letting AppKit
+            // localize it again would remap it twice on Dvorak/AZERTY/etc.
+            item.allowsAutomaticKeyEquivalentLocalization = false
             item.keyEquivalent = equiv.key
             item.keyEquivalentModifierMask = equiv.modifiers
         }

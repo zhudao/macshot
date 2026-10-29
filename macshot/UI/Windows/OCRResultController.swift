@@ -3,7 +3,7 @@ import Cocoa
 class OCRResultController: NSObject {
 
     private var window: NSPanel?
-    private var textView: NSTextView?
+    private var textView: ScopedUndoTextView?
     private var charCountLabel: NSTextField?
     private var translateButton: NSButton?
     private var langPopup: NSPopUpButton?
@@ -33,7 +33,7 @@ class OCRResultController: NSObject {
         let previewW: CGFloat = image != nil ? 240 : 0
         let gap: CGFloat = 0
 
-        let screen = NSScreen.main ?? NSScreen.screens[0]
+        guard let screen = NSScreen.preferred else { return }
         let origin = NSPoint(
             x: screen.visibleFrame.midX - W / 2,
             y: screen.visibleFrame.midY - H / 2
@@ -214,7 +214,7 @@ class OCRResultController: NSObject {
         scrollView.drawsBackground = false
         cv.addSubview(scrollView)
 
-        let tv = NSTextView(frame: NSRect(x: 0, y: 0, width: rightW, height: textAreaH))
+        let tv = ScopedUndoTextView(frame: NSRect(x: 0, y: 0, width: rightW, height: textAreaH))
         tv.isEditable = true
         tv.isSelectable = true
         tv.isRichText = false
@@ -330,6 +330,8 @@ class OCRResultController: NSObject {
     }
 
     private func tearDown() {
+        textView?.discardUndoHistory()
+        textView = nil
         window?.delegate = nil
         window = nil
         onClose?()
@@ -488,24 +490,17 @@ private class KeyablePanel: NSPanel {
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         // Let the first responder handle standard text editing shortcuts first.
         if let fr = firstResponder as? NSTextView {
-            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            if flags == .command {
-                switch event.keyCode {
-                case 8:  fr.copy(nil);      return true  // C
-                case 7:  fr.cut(nil);       return true  // X
-                case 9:  fr.paste(nil);     return true  // V
-                case 0:  fr.selectAll(nil); return true  // A
-                case 6:  fr.undoManager?.undo(); return true  // Z
-                default: break
-                }
-            }
-            if flags == [.command, .shift], event.keyCode == 6 {  // Z
-                fr.undoManager?.redo(); return true
+            if KeyboardShortcutMatcher.matches(event, character: "c", modifiers: .command) { fr.copy(nil); return true }
+            if KeyboardShortcutMatcher.matches(event, character: "x", modifiers: .command) { fr.cut(nil); return true }
+            if KeyboardShortcutMatcher.matches(event, character: "v", modifiers: .command) { fr.paste(nil); return true }
+            if KeyboardShortcutMatcher.matches(event, character: "a", modifiers: .command) { fr.selectAll(nil); return true }
+            if let action = EditorCommandShortcutManager.action(for: event) {
+                if action == .undo { fr.undoManager?.undo() } else { fr.undoManager?.redo() }
+                return true
             }
         }
         // Cmd+W to close — handle outside the text view check so it always works
-        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
-           event.keyCode == 13 {  // W
+        if KeyboardShortcutMatcher.matches(event, character: "w", modifiers: .command) {
             performClose(nil)
             return true
         }

@@ -7,7 +7,7 @@ import UniformTypeIdentifiers
 /// Settings window that intercepts Cmd+Q to close itself instead of quitting the app.
 private class SettingsWindow: NSWindow {
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if event.modifierFlags.contains(.command) && event.keyCode == 12 {  // Q
+        if KeyboardShortcutMatcher.matches(event, character: "q", modifiers: .command) {
             close()
             return true
         }
@@ -47,12 +47,16 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
     private var hotkeyFields: [HotkeyManager.HotkeySlot: NSTextField] = [:]
     private var hotkeyButtons: [HotkeyManager.HotkeySlot: NSButton] = [:]
     private var recordingSlot: HotkeyManager.HotkeySlot?
+    private var commandShortcutFields: [EditorCommandShortcutManager.Action: NSTextField] = [:]
+    private var commandShortcutButtons: [EditorCommandShortcutManager.Action: NSButton] = [:]
+    private var recordingCommandAction: EditorCommandShortcutManager.Action?
     private var toolShortcutFields: [ToolShortcutManager.Action: NSTextField] = [:]
     private var toolShortcutButtons: [ToolShortcutManager.Action: NSButton] = [:]
     private var showToolShortcutsInTooltipsCheckbox: NSButton!
     private var recordingToolAction: ToolShortcutManager.Action?
     private var savePathField: NSTextField!
     private var saveActionPopup: NSPopUpButton!
+    private var copyPathAfterSaveCheckbox: NSButton!
     private var ocrActionPopup: NSPopUpButton!
     private var copySoundCheckbox: NSButton!
     // rememberSelectionCheckbox removed — selection is always saved for "Capture Last Area"
@@ -62,6 +66,7 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
     private var thumbnailAutoDismissField: NSTextField!
     private var thumbnailStackingPopup: NSPopUpButton!
     private var thumbnailCornerPopup: NSPopUpButton!
+    private var thumbnailLetterboxCheckbox: NSButton!
     private var historyUnlimitedCheckbox: NSButton!
     private var historyOrderByLastEditCheckbox: NSButton!
     private var thumbnailScaleLabel: NSTextField!
@@ -81,6 +86,7 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
     private var historySizeStepper: NSStepper!
     private var snapGuidesCheckbox: NSButton!
     private var boundarySnapCheckbox: NSButton!
+    private var browserElementSnapCheckbox: NSButton!
     private var captureCursorCheckbox: NSButton!
     private var doubleClickToCopyCheckbox: NSButton!
     private var hideCaptureInstructionsCheckbox: NSButton!
@@ -97,7 +103,9 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
     private var themePresetPopup: NSPopUpButton!
     private var quickModePopup: NSPopUpButton!
     private var quickCaptureOpenEditorCheckbox: NSButton!
+    private var closeEditorAfterCopyCheckbox: NSButton!
     private var imageFormatPopup: NSPopUpButton!
+    private var clipboardFormatCheckbox: NSButton!
     private var qualitySlider: NSSlider!
     private var qualityLabel: NSTextField!
     private var qualityRowLabel: NSTextField!
@@ -112,6 +120,7 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
     private var providerPopup: NSPopUpButton!
     private var gdriveSignInBtn: NSButton!
     private var gdriveStatusLabel: NSTextField!
+    private var gdriveFolderField: NSTextField!
     // S3 tab controls
     private var s3EndpointField: NSTextField!
     private var s3RegionField: NSTextField!
@@ -120,6 +129,7 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
     private var s3SecretKeyField: NSSecureTextField!
     private var s3PublicURLField: NSTextField!
     private var s3PathPrefixField: NSTextField!
+    private var s3PublicReadCheckbox: NSButton!
     private var s3TestBtn: NSButton!
     private var s3StatusLabel: NSTextField!
     #endif
@@ -129,8 +139,10 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
     private var recSavePathField: NSTextField!
     // Webcam controls
     private var webcamPositionPopup: NSPopUpButton!
-    private var webcamSizePopup: NSPopUpButton!
+    private var webcamSizeSlider: NSSlider!
+    private var webcamSizeLabel: NSTextField!
     private var webcamShapePopup: NSPopUpButton!
+    private var webcamSnapCheckbox: NSButton!
     // Scroll capture controls
     private var scrollAutoScrollCheckbox: NSButton!
     private var scrollSpeedPopup: NSPopUpButton!
@@ -140,6 +152,7 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
     private var languagePopup: NSPopUpButton!
 
     var onHotkeyChanged: (() -> Void)?
+    var onEditorCommandShortcutChanged: (() -> Void)?
 
     init() {
         let window = SettingsWindow(
@@ -273,7 +286,7 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
             view.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
         currentTabID = id
-        window?.title = "\(BuildVariant.displayName) \(L("Settings")) — \(L(Self.tabDefs.first(where: { $0.id == id })?.label ?? ""))"
+        window?.title = "\(BuildVariant.displayName) \(L("Settings")) · \(L(Self.tabDefs.first(where: { $0.id == id })?.label ?? ""))"
         #if !OFFLINE
         if id == "uploads" {
             reloadUploadsTab()
@@ -737,7 +750,10 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
 
         // Enter key action
         quickModePopup = NSPopUpButton()
-        quickModePopup.addItems(withTitles: [L("Save to file"), L("Copy to clipboard"), L("Save + copy to clipboard"), L("Do nothing")])
+        for mode in QuickCaptureMode.settingsOrder {
+            quickModePopup.addItem(withTitle: mode.title)
+            quickModePopup.lastItem?.representedObject = mode.rawValue
+        }
         quickModePopup.target = self
         quickModePopup.action = #selector(quickModeChanged(_:))
 
@@ -746,6 +762,10 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
 
         quickCaptureOpenEditorCheckbox = NSButton(checkboxWithTitle: L("Also open in Editor"), target: self, action: #selector(quickCaptureOpenEditorChanged(_:)))
         stack.addArrangedSubview(indented(quickCaptureOpenEditorCheckbox))
+        stack.setCustomSpacing(6, after: stack.arrangedSubviews.last!)
+
+        closeEditorAfterCopyCheckbox = NSButton(checkboxWithTitle: L("Close editor after copying"), target: self, action: #selector(closeEditorAfterCopyChanged(_:)))
+        stack.addArrangedSubview(indented(closeEditorAfterCopyCheckbox))
         stack.setCustomSpacing(8, after: stack.arrangedSubviews.last!)
 
         // OCR & QR action dropdown
@@ -767,6 +787,10 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         thumbnailCheckbox = NSButton(checkboxWithTitle: L("Show floating thumbnail after capture"), target: self, action: #selector(thumbnailChanged(_:)))
         snapGuidesCheckbox = NSButton(checkboxWithTitle: L("Show snap alignment guides"), target: self, action: #selector(snapGuidesChanged(_:)))
         boundarySnapCheckbox = NSButton(checkboxWithTitle: L("Snap selection edges to image boundaries"), target: self, action: #selector(boundarySnapChanged(_:)))
+        browserElementSnapCheckbox = NSButton(
+            checkboxWithTitle: L("Enhance browser and Electron element snapping"),
+            target: self,
+            action: #selector(browserElementSnapChanged(_:)))
         captureCursorCheckbox = NSButton(checkboxWithTitle: L("Capture mouse cursor in screenshot"), target: self, action: #selector(captureCursorChanged(_:)))
         doubleClickToCopyCheckbox = NSButton(checkboxWithTitle: L("Double-click selection to copy"), target: self, action: #selector(doubleClickToCopyChanged(_:)))
         hideCaptureInstructionsCheckbox = NSButton(checkboxWithTitle: L("Hide capture instructions"), target: self, action: #selector(hideCaptureInstructionsChanged(_:)))
@@ -837,9 +861,25 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         stack.addArrangedSubview(indented(labeledRow(L("  Preview size:"), controls: [sizeSlider, thumbnailScaleLabel])))
         stack.setCustomSpacing(8, after: stack.arrangedSubviews.last!)
 
+        thumbnailLetterboxCheckbox = NSButton(
+            checkboxWithTitle: L("Fit image in preview (letterbox)"),
+            target: self,
+            action: #selector(thumbnailLetterboxChanged(_:))
+        )
+        stack.addArrangedSubview(indented(thumbnailLetterboxCheckbox))
+        stack.setCustomSpacing(8, after: stack.arrangedSubviews.last!)
+
         stack.addArrangedSubview(indented(snapGuidesCheckbox))
         stack.setCustomSpacing(6, after: stack.arrangedSubviews.last!)
         stack.addArrangedSubview(indented(boundarySnapCheckbox))
+        stack.setCustomSpacing(6, after: stack.arrangedSubviews.last!)
+
+        stack.addArrangedSubview(indented(browserElementSnapCheckbox))
+        stack.setCustomSpacing(4, after: stack.arrangedSubviews.last!)
+        let browserElementSnapNote = NSTextField(wrappingLabelWithString: L("Builds the target app's accessibility tree in Element mode. Disable this if a browser or Electron app becomes slow or has input issues."))
+        browserElementSnapNote.font = NSFont.systemFont(ofSize: 10)
+        browserElementSnapNote.textColor = .secondaryLabelColor
+        stack.addArrangedSubview(indented(browserElementSnapNote))
         stack.setCustomSpacing(6, after: stack.arrangedSubviews.last!)
 
         stack.addArrangedSubview(indented(captureCursorCheckbox))
@@ -882,6 +922,14 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         stack.addArrangedSubview(labeledRow(L("Save folder:"), controls: [savePathField, browseBtn]))
         stack.setCustomSpacing(8, after: stack.arrangedSubviews.last!)
 
+        copyPathAfterSaveCheckbox = NSButton(
+            checkboxWithTitle: L("Copy Path"),
+            target: self,
+            action: #selector(copyPathAfterSaveChanged(_:))
+        )
+        stack.addArrangedSubview(indented(copyPathAfterSaveCheckbox))
+        stack.setCustomSpacing(8, after: stack.arrangedSubviews.last!)
+
         // Filename template
         let filenameResetBtn = NSButton(title: L("Reset"), target: self, action: #selector(filenameTemplateReset(_:)))
         filenameResetBtn.bezelStyle = .rounded
@@ -911,6 +959,17 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         imageFormatPopup.action = #selector(imageFormatChanged(_:))
 
         stack.addArrangedSubview(labeledRow(L("Image format:"), controls: [imageFormatPopup]))
+        stack.setCustomSpacing(6, after: stack.arrangedSubviews.last!)
+
+        clipboardFormatCheckbox = NSButton(checkboxWithTitle: L("Also copy to the clipboard in this format"),
+                                           target: self, action: #selector(clipboardFormatChanged(_:)))
+        stack.addArrangedSubview(indented(clipboardFormatCheckbox))
+        stack.setCustomSpacing(2, after: stack.arrangedSubviews.last!)
+
+        let clipboardFormatNote = NSTextField(labelWithString: L("PNG is always included so every app can paste"))
+        clipboardFormatNote.font = NSFont.systemFont(ofSize: 10)
+        clipboardFormatNote.textColor = .tertiaryLabelColor
+        stack.addArrangedSubview(indented(clipboardFormatNote))
         stack.setCustomSpacing(8, after: stack.arrangedSubviews.last!)
 
         // Quality (applies to lossy formats: JPEG, HEIC, WebP, AVIF)
@@ -1228,6 +1287,51 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         note.textColor = .secondaryLabelColor
         stack.addArrangedSubview(indented(note))
 
+        // ── Undo / Redo command shortcuts ───────────────────
+        stack.setCustomSpacing(20, after: stack.arrangedSubviews.last!)
+        stack.addArrangedSubview(sectionHeader("\(L("Undo")) / \(L("Redo"))"))
+        stack.setCustomSpacing(10, after: stack.arrangedSubviews.last!)
+
+        for action in EditorCommandShortcutManager.Action.allCases {
+            let index = EditorCommandShortcutManager.Action.allCases.firstIndex(of: action)!
+            let field = NSTextField()
+            field.isEditable = false
+            field.isSelectable = false
+            field.alignment = .center
+            field.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+            field.widthAnchor.constraint(equalToConstant: 100).isActive = true
+            field.stringValue = EditorCommandShortcutManager.displayString(for: action)
+
+            let button = NSButton(title: L("Set"), target: self, action: #selector(recordCommandShortcut(_:)))
+            button.bezelStyle = .rounded
+            button.tag = index
+
+            let clearButton = NSButton(title: "", target: self, action: #selector(clearCommandShortcut(_:)))
+            clearButton.bezelStyle = .inline
+            clearButton.isBordered = false
+            clearButton.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: L("None"))
+            clearButton.contentTintColor = .secondaryLabelColor
+            clearButton.imagePosition = .imageOnly
+            clearButton.tag = index
+            clearButton.toolTip = L("None")
+            clearButton.widthAnchor.constraint(equalToConstant: 20).isActive = true
+
+            let resetButton = NSButton(title: "", target: self, action: #selector(resetCommandShortcut(_:)))
+            resetButton.bezelStyle = .inline
+            resetButton.isBordered = false
+            resetButton.image = NSImage(systemSymbolName: "arrow.counterclockwise.circle.fill", accessibilityDescription: L("Reset to default"))
+            resetButton.contentTintColor = .secondaryLabelColor
+            resetButton.imagePosition = .imageOnly
+            resetButton.tag = index
+            resetButton.toolTip = L("Reset to default")
+            resetButton.widthAnchor.constraint(equalToConstant: 20).isActive = true
+
+            commandShortcutFields[action] = field
+            commandShortcutButtons[action] = button
+            stack.addArrangedSubview(labeledRow("\(action.label):", controls: [field, button, clearButton, resetButton]))
+            stack.setCustomSpacing(8, after: stack.arrangedSubviews.last!)
+        }
+
         // ── Overlay / Editor Tool Shortcuts ──────────────────
         stack.setCustomSpacing(20, after: stack.arrangedSubviews.last!)
         stack.addArrangedSubview(sectionHeader(L("Overlay / Editor Shortcuts")))
@@ -1312,8 +1416,9 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
             stopShortcutRecording()
             return
         }
-        // Stop any previous recording (global or tool)
+        // Stop any previous recording.
         stopShortcutRecording()
+        stopCommandShortcutRecording()
         stopToolShortcutRecording()
 
         recordingSlot = slot
@@ -1322,6 +1427,10 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
 
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self = self else { return event }
+            if event.keyCode == 53 {
+                self.stopShortcutRecording()
+                return nil
+            }
             let modifiers = event.modifierFlags
             var carbonMods: UInt32 = 0
             if modifiers.contains(.command) { carbonMods |= UInt32(cmdKey) }
@@ -1363,6 +1472,77 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         if let m = localMonitor { NSEvent.removeMonitor(m); localMonitor = nil }
     }
 
+    // MARK: - Editor Command Shortcuts
+
+    @objc private func recordCommandShortcut(_ sender: NSButton) {
+        let actions = EditorCommandShortcutManager.Action.allCases
+        guard sender.tag >= 0, sender.tag < actions.count else { return }
+        let action = actions[sender.tag]
+        if recordingCommandAction == action {
+            stopCommandShortcutRecording()
+            return
+        }
+
+        stopShortcutRecording()
+        stopCommandShortcutRecording()
+        stopToolShortcutRecording()
+        recordingCommandAction = action
+        sender.title = L("Press keys...")
+        commandShortcutFields[action]?.stringValue = L("Waiting...")
+
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            if event.keyCode == 53 {
+                self.stopCommandShortcutRecording()
+                return nil
+            }
+            let modifiers = KeyboardShortcutMatcher.modifiers(in: event)
+            // Editor commands are menu key equivalents, so require Command;
+            // Shift/Option/Control may be added to distinguish the chord.
+            guard modifiers.contains(.command),
+                  let character = KeyboardShortcutMatcher.semanticCharacter(for: event) else {
+                return nil
+            }
+            let shortcut = EditorCommandShortcutManager.Shortcut(
+                character: character,
+                modifiers: modifiers)
+            EditorCommandShortcutManager.setShortcut(shortcut, for: action)
+            self.stopCommandShortcutRecording()
+            self.refreshShortcutDisplaysForKeyboardLayout()
+            self.onEditorCommandShortcutChanged?()
+            return nil
+        }
+    }
+
+    @objc private func clearCommandShortcut(_ sender: NSButton) {
+        let actions = EditorCommandShortcutManager.Action.allCases
+        guard sender.tag >= 0, sender.tag < actions.count else { return }
+        let action = actions[sender.tag]
+        stopCommandShortcutRecording()
+        EditorCommandShortcutManager.disable(action)
+        commandShortcutFields[action]?.stringValue = L("None")
+        onEditorCommandShortcutChanged?()
+    }
+
+    @objc private func resetCommandShortcut(_ sender: NSButton) {
+        let actions = EditorCommandShortcutManager.Action.allCases
+        guard sender.tag >= 0, sender.tag < actions.count else { return }
+        let action = actions[sender.tag]
+        stopCommandShortcutRecording()
+        EditorCommandShortcutManager.reset(action)
+        commandShortcutFields[action]?.stringValue = EditorCommandShortcutManager.displayString(for: action)
+        onEditorCommandShortcutChanged?()
+    }
+
+    private func stopCommandShortcutRecording() {
+        if let action = recordingCommandAction {
+            commandShortcutFields[action]?.stringValue = EditorCommandShortcutManager.displayString(for: action)
+            commandShortcutButtons[action]?.title = L("Set")
+        }
+        recordingCommandAction = nil
+        if let monitor = localMonitor { NSEvent.removeMonitor(monitor); localMonitor = nil }
+    }
+
     // MARK: - Overlay Tool Shortcuts
 
     @objc private func recordToolShortcut(_ sender: NSButton) {
@@ -1375,8 +1555,9 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
             stopToolShortcutRecording()
             return
         }
-        // Stop any other recording (global or tool)
+        // Stop any other recording.
         stopShortcutRecording()
+        stopCommandShortcutRecording()
         stopToolShortcutRecording()
 
         recordingToolAction = action
@@ -1393,8 +1574,7 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
             guard !event.modifierFlags.contains(.command),
                   !event.modifierFlags.contains(.option),
                   !event.modifierFlags.contains(.control),
-                  let char = event.charactersIgnoringModifiers?.lowercased(),
-                  char.count == 1 else { return nil }
+                  let char = KeyboardShortcutMatcher.semanticCharacter(for: event) else { return nil }
 
             ToolShortcutManager.setKey(char, for: action)
             self.toolShortcutFields[action]?.stringValue = ToolShortcutManager.displayString(for: action)
@@ -1605,11 +1785,22 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         stack.setCustomSpacing(10, after: stack.arrangedSubviews.last!)
 
         recordingOnStopPopup = NSPopUpButton()
-        recordingOnStopPopup.addItems(withTitles: [L("Open editor"), L("Show in Finder"), L("Copy to clipboard")])
+        recordingOnStopPopup.addItems(withTitles: [L("Open editor"), L("Show in Finder"), L("Copy to clipboard"), L("Save + copy to clipboard")])
         recordingOnStopPopup.target = self
         recordingOnStopPopup.action = #selector(recordingOnStopChanged(_:))
         stack.addArrangedSubview(labeledRow(L("When done:"), controls: [recordingOnStopPopup]))
         stack.setCustomSpacing(8, after: stack.arrangedSubviews.last!)
+
+        let editableCheckbox = NSButton(checkboxWithTitle: L("Editable pointer, clicks and keystrokes"),
+                                        target: self, action: #selector(editablePointerChanged(_:)))
+        editableCheckbox.state = AppDelegate.recordsEditablePointer ? .on : .off
+        stack.addArrangedSubview(indented(editableCheckbox))
+        let editableNote = NSTextField(wrappingLabelWithString: L("When recordings open in the editor, the pointer is recorded separately so you can smooth, resize, restyle or hide it, and add zooms that follow it."))
+        editableNote.font = NSFont.systemFont(ofSize: 10)
+        editableNote.textColor = .secondaryLabelColor
+        editableNote.preferredMaxLayoutWidth = 420
+        stack.addArrangedSubview(indented(editableNote))
+        stack.setCustomSpacing(10, after: stack.arrangedSubviews.last!)
 
         let hideHUDCheckbox = NSButton(checkboxWithTitle: L("Hide recording controls"), target: self, action: #selector(hideRecordingHUDChanged(_:)))
         hideHUDCheckbox.state = UserDefaults.standard.bool(forKey: "hideRecordingHUD") ? .on : .off
@@ -1632,11 +1823,22 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         stack.addArrangedSubview(labeledRow(L("Position:"), controls: [webcamPositionPopup]))
         stack.setCustomSpacing(8, after: stack.arrangedSubviews.last!)
 
-        webcamSizePopup = NSPopUpButton()
-        webcamSizePopup.addItems(withTitles: [L("Webcam Size Small"), L("Webcam Size Medium"), L("Webcam Size Large"), L("Webcam Size Extra Large")])
-        webcamSizePopup.target = self
-        webcamSizePopup.action = #selector(webcamSizeChanged(_:))
-        stack.addArrangedSubview(labeledRow(L("Size:"), controls: [webcamSizePopup]))
+        webcamSizeSlider = NSSlider(
+            value: Double(WebcamSize.savedPoints),
+            minValue: Double(WebcamSize.minPoints),
+            maxValue: Double(WebcamSize.maxPoints),
+            target: self, action: #selector(webcamSizeChanged(_:)))
+        webcamSizeSlider.isContinuous = true
+        webcamSizeSlider.translatesAutoresizingMaskIntoConstraints = false
+        webcamSizeSlider.widthAnchor.constraint(equalToConstant: 220).isActive = true
+        webcamSizeLabel = NSTextField(labelWithString: "")
+        webcamSizeLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        webcamSizeLabel.alignment = .right
+        webcamSizeLabel.translatesAutoresizingMaskIntoConstraints = false
+        webcamSizeLabel.widthAnchor.constraint(equalToConstant: 52).isActive = true
+        updateWebcamSizeLabel()
+        stack.addArrangedSubview(labeledRow(
+            L("Size:"), controls: [webcamSizeSlider, webcamSizeLabel]))
         stack.setCustomSpacing(8, after: stack.arrangedSubviews.last!)
 
         webcamShapePopup = NSPopUpButton()
@@ -1644,6 +1846,11 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         webcamShapePopup.target = self
         webcamShapePopup.action = #selector(webcamShapeChanged(_:))
         stack.addArrangedSubview(labeledRow(L("Shape:"), controls: [webcamShapePopup]))
+        stack.setCustomSpacing(8, after: stack.arrangedSubviews.last!)
+
+        webcamSnapCheckbox = NSButton(checkboxWithTitle: L("Snap webcam to corners when moved"),
+                                      target: self, action: #selector(webcamSnapChanged(_:)))
+        stack.addArrangedSubview(webcamSnapCheckbox)
         stack.setCustomSpacing(20, after: stack.arrangedSubviews.last!)
 
         // ── Scroll Capture ────────────────────────────────────
@@ -1757,9 +1964,18 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
 
         stack.addArrangedSubview(labeledRow(L("Account:"), controls: [gdriveStatusLabel]))
         stack.addArrangedSubview(indented(gdriveSignInBtn))
+        stack.setCustomSpacing(10, after: stack.arrangedSubviews.last!)
+
+        gdriveFolderField = NSTextField()
+        gdriveFolderField.placeholderString = "macshot"
+        gdriveFolderField.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        gdriveFolderField.stringValue = UserDefaults.standard.string(forKey: "gdriveFolderName") ?? ""
+        gdriveFolderField.target = self
+        gdriveFolderField.action = #selector(gdriveFolderChanged(_:))
+        stack.addArrangedSubview(labeledRow(L("Folder:"), controls: [gdriveFolderField]))
         stack.setCustomSpacing(4, after: stack.arrangedSubviews.last!)
 
-        let gdriveNote = NSTextField(wrappingLabelWithString: L("Files are uploaded to a \"macshot\" folder in your Google Drive. Everything stays private — nothing is shared publicly."))
+        let gdriveNote = NSTextField(wrappingLabelWithString: L("Files are uploaded to this folder in your Google Drive. Leave empty to use \"macshot\". macshot can only use folders it created itself, so a folder you made in Drive with the same name won't be reused. A new one is created instead. Everything stays private and nothing is shared publicly."))
         gdriveNote.font = NSFont.systemFont(ofSize: 10)
         gdriveNote.textColor = .secondaryLabelColor
         stack.addArrangedSubview(indented(gdriveNote))
@@ -1824,12 +2040,30 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         stack.addArrangedSubview(indented(publicURLNote))
 
         s3PathPrefixField = NSTextField()
-        s3PathPrefixField.placeholderString = "screenshots/"
+        s3PathPrefixField.placeholderString = "screenshots/{year}/{month}/{day}/"
         s3PathPrefixField.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
         s3PathPrefixField.stringValue = UserDefaults.standard.string(forKey: "s3PathPrefix") ?? ""
         s3PathPrefixField.target = self
         s3PathPrefixField.action = #selector(s3FieldChanged(_:))
         stack.addArrangedSubview(labeledRow(L("Path Prefix:"), controls: [s3PathPrefixField]))
+        stack.setCustomSpacing(4, after: stack.arrangedSubviews.last!)
+
+        let pathPrefixNote = NSTextField(labelWithString:
+            "{year}/{month}/{day} → " + S3Uploader.Config.expandDatePlaceholders(in: "{year}/{month}/{day}"))
+        pathPrefixNote.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+        pathPrefixNote.textColor = .secondaryLabelColor
+        stack.addArrangedSubview(indented(pathPrefixNote))
+        stack.setCustomSpacing(8, after: stack.arrangedSubviews.last!)
+
+        s3PublicReadCheckbox = NSButton(checkboxWithTitle: L("Make uploads publicly readable"), target: self, action: #selector(s3PublicReadChanged(_:)))
+        s3PublicReadCheckbox.state = UserDefaults.standard.bool(forKey: "s3PublicRead") ? .on : .off
+        stack.addArrangedSubview(indented(s3PublicReadCheckbox))
+        stack.setCustomSpacing(4, after: stack.arrangedSubviews.last!)
+
+        let publicReadNote = NSTextField(wrappingLabelWithString: L("Sends the public-read ACL so uploaded files are viewable by anyone with the link. Needed for AWS S3, DigitalOcean Spaces, MinIO and Backblaze B2, which store objects privately by default. Leave off for Cloudflare R2, which has no ACLs and rejects the header."))
+        publicReadNote.font = NSFont.systemFont(ofSize: 10)
+        publicReadNote.textColor = .secondaryLabelColor
+        stack.addArrangedSubview(indented(publicReadNote))
         stack.setCustomSpacing(8, after: stack.arrangedSubviews.last!)
 
         s3TestBtn = NSButton(title: L("Test Connection"), target: self, action: #selector(s3TestTapped(_:)))
@@ -1868,7 +2102,7 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         stack.addArrangedSubview(labeledRow(L("API key:"), controls: [imgbbKeyField]))
         stack.setCustomSpacing(4, after: stack.arrangedSubviews.last!)
 
-        let imgbbNote = NSTextField(wrappingLabelWithString: L("A shared key is included — get your own free key at imgbb.com/api if you hit rate limits. Images only (no video support)."))
+        let imgbbNote = NSTextField(wrappingLabelWithString: L("A shared key is included. Get your own free key at imgbb.com/api if you hit rate limits. Images only (no video support)."))
         imgbbNote.font = NSFont.systemFont(ofSize: 10)
         imgbbNote.textColor = .secondaryLabelColor
         stack.addArrangedSubview(indented(imgbbNote))
@@ -1946,7 +2180,7 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         stack.setCustomSpacing(20, after: versionLabel)
 
         // Description
-        let desc = NSTextField(wrappingLabelWithString: L("A free, open-source screenshot & screen recording tool for macOS.\nFully native — built with Swift and AppKit."))
+        let desc = NSTextField(wrappingLabelWithString: L("A free, open-source screenshot & screen recording tool for macOS.\nFully native, built with Swift and AppKit."))
         desc.font = NSFont.systemFont(ofSize: 13)
         desc.textColor = .labelColor
         desc.alignment = .center
@@ -2097,6 +2331,10 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         }
     }
 
+    @objc private func gdriveFolderChanged(_ sender: NSTextField) {
+        UserDefaults.standard.set(gdriveFolderField.stringValue, forKey: "gdriveFolderName")
+    }
+
     @objc private func s3FieldChanged(_ sender: NSTextField) {
         UserDefaults.standard.set(s3EndpointField.stringValue, forKey: "s3Endpoint")
         UserDefaults.standard.set(s3RegionField.stringValue, forKey: "s3Region")
@@ -2105,6 +2343,10 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         UserDefaults.standard.set(s3SecretKeyField.stringValue, forKey: "s3SecretAccessKey")
         UserDefaults.standard.set(s3PublicURLField.stringValue, forKey: "s3PublicURLBase")
         UserDefaults.standard.set(s3PathPrefixField.stringValue, forKey: "s3PathPrefix")
+    }
+
+    @objc private func s3PublicReadChanged(_ sender: NSButton) {
+        UserDefaults.standard.set(sender.state == .on, forKey: "s3PublicRead")
     }
 
     @objc private func s3TestTapped(_ sender: NSButton) {
@@ -2366,14 +2608,22 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
 
     // MARK: - Load settings
 
-    private func loadSettings() {
-        // Load shortcut fields
+    func refreshShortcutDisplaysForKeyboardLayout() {
         for slot in HotkeyManager.HotkeySlot.allCases {
             hotkeyFields[slot]?.stringValue = HotkeyManager.displayString(for: slot)
         }
+        for action in EditorCommandShortcutManager.Action.allCases {
+            commandShortcutFields[action]?.stringValue = EditorCommandShortcutManager.displayString(for: action)
+        }
+    }
+
+    private func loadSettings() {
+        // Load shortcut fields
+        refreshShortcutDisplaysForKeyboardLayout()
 
         savePathField.stringValue = SaveDirectoryAccess.displayPath
         selectSaveAction(SaveActionPreference.current)
+        copyPathAfterSaveCheckbox.state = ImageSaveService.copyPathAfterSave ? .on : .off
 
         // Migrate legacy bool to new int setting
         if UserDefaults.standard.object(forKey: "ocrAction") == nil {
@@ -2394,6 +2644,7 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
 
         let thumbnail = UserDefaults.standard.object(forKey: "showFloatingThumbnail") as? Bool ?? true
         thumbnailCheckbox.state = thumbnail ? .on : .off
+        thumbnailLetterboxCheckbox.state = UserDefaults.standard.bool(forKey: "thumbnailLetterbox") ? .on : .off
 
         let autoDismiss = UserDefaults.standard.object(forKey: "thumbnailAutoDismiss") as? Int ?? 5
         thumbnailAutoDismissField.integerValue = autoDismiss
@@ -2424,6 +2675,9 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         snapGuidesCheckbox.state = snapGuides ? .on : .off
         let boundarySnap = UserDefaults.standard.object(forKey: "boundarySnapEnabled") as? Bool ?? true
         boundarySnapCheckbox.state = boundarySnap ? .on : .off
+        let browserElementSnap = UserDefaults.standard.object(
+            forKey: OverlayView.browserElementSnapEnabledKey) as? Bool ?? true
+        browserElementSnapCheckbox.state = browserElementSnap ? .on : .off
         showToolShortcutsInTooltipsCheckbox.state = UserDefaults.standard.bool(forKey: "showToolShortcutsInTooltips") ? .on : .off
 
         captureCursorCheckbox.state = UserDefaults.standard.bool(forKey: "captureCursor") ? .on : .off
@@ -2456,15 +2710,18 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
             // If old autoCopy was on + save mode, migrate to "both"
             let hadAutoCopy = UserDefaults.standard.object(forKey: "autoCopyToClipboard") as? Bool ?? true
             let migratedMode = (!oldBool && hadAutoCopy) ? 2 : mode
-            UserDefaults.standard.set(migratedMode, forKey: "quickCaptureMode")
+            UserDefaults.standard.set(migratedMode, forKey: QuickCaptureMode.userDefaultsKey)
             UserDefaults.standard.removeObject(forKey: "quickModeCopyToClipboard")
             UserDefaults.standard.removeObject(forKey: "autoCopyToClipboard")
         }
-        let quickMode = UserDefaults.standard.object(forKey: "quickCaptureMode") as? Int ?? 1
-        quickModePopup.selectItem(at: quickMode)
+        let quickMode = QuickCaptureMode.current
+        quickModePopup.select(
+            quickModePopup.itemArray.first { $0.representedObject as? Int == quickMode.rawValue })
         quickCaptureOpenEditorCheckbox.state = UserDefaults.standard.bool(forKey: "quickCaptureOpenEditor") ? .on : .off
+        closeEditorAfterCopyCheckbox.state = UserDefaults.standard.bool(forKey: "closeEditorAfterCopy") ? .on : .off
 
         selectImageFormat(ImageEncoder.format)
+        clipboardFormatCheckbox.state = ImageEncoder.clipboardIncludesImageFormat ? .on : .off
 
         let quality = Int(ImageEncoder.quality * 100)
         qualitySlider.integerValue = quality
@@ -2487,6 +2744,7 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         switch onStop {
         case "finder": recordingOnStopPopup.selectItem(at: 1)
         case "clipboard": recordingOnStopPopup.selectItem(at: 2)
+        case "save": recordingOnStopPopup.selectItem(at: 3)
         default: recordingOnStopPopup.selectItem(at: 0)
         }
 
@@ -2502,16 +2760,11 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         default: webcamPositionPopup.selectItem(at: 0)
         }
 
-        let webcamSize = UserDefaults.standard.string(forKey: "webcamSize") ?? "medium"
-        switch webcamSize {
-        case "small": webcamSizePopup.selectItem(at: 0)
-        case "medium": webcamSizePopup.selectItem(at: 1)
-        case "large": webcamSizePopup.selectItem(at: 2)
-        case "xlarge": webcamSizePopup.selectItem(at: 3)
-        default: webcamSizePopup.selectItem(at: 1)
-        }
+        webcamSizeSlider.doubleValue = Double(WebcamSize.savedPoints)
+        updateWebcamSizeLabel()
 
         webcamShapePopup.selectItem(at: (UserDefaults.standard.string(forKey: "webcamShape") ?? "circle") == "roundedRect" ? 1 : 0)
+        webcamSnapCheckbox.state = WebcamPlacement.snapsToCorners ? .on : .off
 
         // Scroll Capture
         let autoScroll = UserDefaults.standard.object(forKey: "scrollAutoScrollEnabled") as? Bool ?? false
@@ -2532,6 +2785,8 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         qualitySlider.isEnabled = hasQuality
         qualityLabel.textColor = hasQuality ? .labelColor : .tertiaryLabelColor
         qualityRowLabel.textColor = hasQuality ? .labelColor : .tertiaryLabelColor
+        // PNG is already on the clipboard, so the option only matters for other formats.
+        clipboardFormatCheckbox.isEnabled = raw.flatMap(ImageEncoder.Format.init(rawValue:)).map { $0 != .png } ?? false
     }
 
     private func selectImageFormat(_ format: ImageEncoder.Format) {
@@ -2577,6 +2832,9 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
               let action = SaveActionPreference(rawValue: raw) else { return }
         SaveActionPreference.current = action
     }
+    @objc private func copyPathAfterSaveChanged(_ sender: NSButton) {
+        ImageSaveService.copyPathAfterSave = sender.state == .on
+    }
     @objc private func copySoundChanged(_ sender: NSButton) {
         UserDefaults.standard.set(sender.state == .on, forKey: "playCopySound")
     }
@@ -2598,6 +2856,9 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         UserDefaults.standard.set(sender.doubleValue, forKey: "thumbnailScale")
         thumbnailScaleLabel?.stringValue = scalePercentString(sender.doubleValue)
     }
+    @objc private func thumbnailLetterboxChanged(_ sender: NSButton) {
+        UserDefaults.standard.set(sender.state == .on, forKey: "thumbnailLetterbox")
+    }
 
     private func scalePercentString(_ scale: Double) -> String {
         "\(Int(round(scale * 100)))%"
@@ -2611,10 +2872,15 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         UserDefaults.standard.set(values[sender.indexOfSelectedItem], forKey: "thumbnailCorner")
     }
     @objc private func quickModeChanged(_ sender: NSPopUpButton) {
-        UserDefaults.standard.set(sender.indexOfSelectedItem, forKey: "quickCaptureMode")
+        guard let rawValue = sender.selectedItem?.representedObject as? Int,
+              QuickCaptureMode(rawValue: rawValue) != nil else { return }
+        UserDefaults.standard.set(rawValue, forKey: QuickCaptureMode.userDefaultsKey)
     }
     @objc private func quickCaptureOpenEditorChanged(_ sender: NSButton) {
         UserDefaults.standard.set(sender.state == .on, forKey: "quickCaptureOpenEditor")
+    }
+    @objc private func closeEditorAfterCopyChanged(_ sender: NSButton) {
+        UserDefaults.standard.set(sender.state == .on, forKey: "closeEditorAfterCopy")
     }
     @objc private func languageChanged(_ sender: NSPopUpButton) {
         let languages = LanguageManager.availableLanguages
@@ -2636,6 +2902,9 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
     @objc private func qualityChanged(_ sender: NSSlider) {
         qualityLabel.stringValue = String(format: L("%d%%"), sender.integerValue)
         UserDefaults.standard.set(Double(sender.integerValue) / 100.0, forKey: "imageQuality")
+    }
+    @objc private func clipboardFormatChanged(_ sender: NSButton) {
+        UserDefaults.standard.set(sender.state == .on, forKey: "clipboardIncludesImageFormat")
     }
     @objc private func downscaleRetinaChanged(_ sender: NSButton) {
         UserDefaults.standard.set(sender.state == .on, forKey: "downscaleRetina")
@@ -2679,8 +2948,12 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         let fps = fpsOptions[min(sender.indexOfSelectedItem, fpsOptions.count - 1)]
         UserDefaults.standard.set(fps, forKey: "recordingFPS")
     }
+    @objc private func editablePointerChanged(_ sender: NSButton) {
+        UserDefaults.standard.set(sender.state == .on, forKey: AppDelegate.editablePointerDefaultsKey)
+    }
+
     @objc private func recordingOnStopChanged(_ sender: NSPopUpButton) {
-        let values = ["editor", "finder", "clipboard"]
+        let values = ["editor", "finder", "clipboard", "save"]
         UserDefaults.standard.set(values[sender.indexOfSelectedItem], forKey: "recordingOnStop")
     }
     @objc private func hideRecordingHUDChanged(_ sender: NSButton) {
@@ -2689,12 +2962,23 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
 
     @objc private func webcamPositionChanged(_ sender: NSPopUpButton) {
         let values = ["bottomRight", "bottomLeft", "topRight", "topLeft"]
-        UserDefaults.standard.set(values[sender.indexOfSelectedItem], forKey: "webcamPosition")
+        if let position = WebcamPosition(rawValue: values[sender.indexOfSelectedItem]) {
+            WebcamPlacement.saveCorner(position)
+        }
     }
 
-    @objc private func webcamSizeChanged(_ sender: NSPopUpButton) {
-        let values = ["small", "medium", "large", "xlarge"]
-        UserDefaults.standard.set(values[sender.indexOfSelectedItem], forKey: "webcamSize")
+    @objc private func webcamSnapChanged(_ sender: NSButton) {
+        UserDefaults.standard.set(sender.state == .on, forKey: WebcamPlacement.snapKey)
+    }
+
+    @objc private func webcamSizeChanged(_ sender: NSSlider) {
+        WebcamSize.save(points: CGFloat(sender.doubleValue))
+        sender.doubleValue = Double(WebcamSize.savedPoints)
+        updateWebcamSizeLabel()
+    }
+
+    private func updateWebcamSizeLabel() {
+        webcamSizeLabel?.stringValue = "\(Int(WebcamSize.savedPoints)) px"
     }
 
     @objc private func webcamShapeChanged(_ sender: NSPopUpButton) {
@@ -2812,7 +3096,8 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
 
     @objc private func themePresetChanged(_ sender: NSPopUpButton) {
         let idx = sender.indexOfSelectedItem
-        guard idx < ThemePreset.all.count else { return } // "Custom" — no-op
+        // indexOfSelectedItem is -1 with no selection, which passes "< count".
+        guard idx >= 0, idx < ThemePreset.all.count else { return } // "Custom" — no-op
         applyThemePreset(ThemePreset.all[idx])
     }
 
@@ -2869,6 +3154,11 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
     @objc private func boundarySnapChanged(_ sender: NSButton) {
         UserDefaults.standard.set(sender.state == .on, forKey: "boundarySnapEnabled")
     }
+    @objc private func browserElementSnapChanged(_ sender: NSButton) {
+        UserDefaults.standard.set(
+            sender.state == .on,
+            forKey: OverlayView.browserElementSnapEnabledKey)
+    }
     @objc private func captureCursorChanged(_ sender: NSButton) {
         UserDefaults.standard.set(sender.state == .on, forKey: "captureCursor")
     }
@@ -2904,7 +3194,9 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         let sampleDate = sampleFilenameDate()
         let sampleWindow = template.contains("{window}") ? "Example Window" : nil
         let sampleIndex = template.contains("{index}") ? 1 : nil
-        let base = FilenameFormatter.format(template: template, windowTitle: sampleWindow, index: sampleIndex, date: sampleDate)
+        let base = FilenameFormatter.formatRelativePath(
+            template: template, windowTitle: sampleWindow, appName: "Safari", index: sampleIndex, date: sampleDate
+        ).joined(separator: "/")
         preview.stringValue = "\(L("Preview:")) \(base).\(ImageEncoder.fileExtension)"
     }
 
@@ -2930,7 +3222,10 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         let template = raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? FilenameFormatter.defaultRecordingTemplate : raw
         let sampleDate = sampleFilenameDate()
         let sampleIndex = template.contains("{index}") ? 1 : nil
-        let base = FilenameFormatter.format(template: template, windowTitle: nil, index: sampleIndex, date: sampleDate, fallback: FilenameFormatter.defaultRecordingTemplate)
+        let base = FilenameFormatter.formatRelativePath(
+            template: template, appName: "Safari", index: sampleIndex, date: sampleDate,
+            fallback: FilenameFormatter.defaultRecordingTemplate
+        ).joined(separator: "/")
         preview.stringValue = "\(L("Preview:")) \(base).mp4"
     }
 
@@ -3121,6 +3416,9 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
     }
 
     func windowWillClose(_ notification: Notification) {
+        stopShortcutRecording()
+        stopCommandShortcutRecording()
+        stopToolShortcutRecording()
         (NSApp.delegate as? AppDelegate)?.returnFocusIfNeeded()
     }
 }
@@ -3172,9 +3470,13 @@ extension SettingsWindowController {
             ("{time}",      "14-22-05"),
             ("{timestamp}", "2026-04-17_14-22-05"),
             ("{unix}",      "1745592125"),
-            ("{window}",    L("Screenshots only — captured window title (blank otherwise)")),
+            ("{window}",    L("Captured window title (screenshots only, blank otherwise)")),
             ("{index}",     L("Counter for multi-screen captures")),
             ("{random}",    L("8-character random string (e.g. k3j7x9q2)")),
+            ("{app}",       "Safari"),
+            ("{yyyy}/{MM}/{dd}", "2026/04/17"),
+            ("{HH}.{mm}.{ss}",   "14.22.05"),
+            ("{ms}",        "042"),
         ]
 
         let title = NSTextField(labelWithString: L("Filename Template Tokens"))

@@ -1,5 +1,8 @@
 # macshot
 
+> [!IMPORTANT]
+> **Upgrading to a 4.4.0 beta from 4.3.x or beta.1/beta.2?** macshot's developer signature changed in beta.3, so macOS may require you to grant permissions again. If Screen Recording looks enabled but capture fails, remove macshot with the minus button (−) in System Settings, then add it back from Applications with the plus button (+). Re-enable Accessibility or Input Monitoring if prompted. Your settings, history and recordings are preserved. If you already restored permissions in beta.3 or later, you should not need to repeat this.
+
 <p align="center">
   <img src="assets/logo.svg" alt="macshot logo" width="200"/>
 </p>
@@ -12,7 +15,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/sw33tLie/macshot/releases/latest">Download</a> · <a href="https://github.com/sw33tLie/macshot/blob/main/CHANGELOG.md">Changelog</a> · <a href="https://github.com/sw33tLie/macshot/blob/main/PRIVACY.md">Privacy</a>
+  <a href="https://github.com/sw33tLie/macshot/releases/latest">Download</a> · <a href="https://github.com/sw33tLie/macshot/blob/main/CHANGELOG.md">Changelog</a> · <a href="https://github.com/sw33tLie/macshot/blob/main/PRIVACY.md">Privacy</a> · <a href="https://github.com/sw33tLie/macshot/blob/main/SECURITY.md">Security</a>
 </p>
 
 <p align="center">
@@ -98,7 +101,7 @@ brew install --cask macshot
 
 ### Output & Upload
 - **Formats** — PNG, JPEG, HEIC, WebP, AVIF with quality slider
-- **Google Drive** — sign in once, uploads to a private "macshot" folder
+- **Google Drive** — sign in once, uploads to a private folder (defaults to "macshot", configurable in Settings)
 - **imgbb** — anonymous image hosting with shareable links
 - **S3-compatible** — upload to Cloudflare R2, AWS S3, MinIO, DigitalOcean Spaces, Backblaze B2, etc.
 - **Retina downscale** — optional 1x export for smaller files
@@ -203,16 +206,6 @@ Thanks for thinking about it, but macshot doesn't take donations. I make this in
 If you'd like to help out, starring the repo, reporting bugs, or contributing is more than enough. Thank you! 🙏
 
 ---
-
-## Star History
-
-<a href="https://www.star-history.com/?type=date&repos=sw33tLie%2Fmacshot">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=sw33tLie/macshot&type=date&theme=dark&legend=top-left&sealed_token=cGABeABxKwRrI6y0MxEhh5y6c6U-TgTzFdPZSYSeaGnRmxDA__Q3haAJBOamrR7OSXNXQk3qnqEQGJ7_GDpbAk1SxIXrrYPN2yjnjUVB3BYhNIPjKFozWsiavKRr7fiNhF7nsyDIQzYNE9K1repNx879MKeBaK5WiFfrGXpoiDchQK6eFqJs2I5NuZXd" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=sw33tLie/macshot&type=date&legend=top-left&sealed_token=cGABeABxKwRrI6y0MxEhh5y6c6U-TgTzFdPZSYSeaGnRmxDA__Q3haAJBOamrR7OSXNXQk3qnqEQGJ7_GDpbAk1SxIXrrYPN2yjnjUVB3BYhNIPjKFozWsiavKRr7fiNhF7nsyDIQzYNE9K1repNx879MKeBaK5WiFfrGXpoiDchQK6eFqJs2I5NuZXd" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=sw33tLie/macshot&type=date&legend=top-left&sealed_token=cGABeABxKwRrI6y0MxEhh5y6c6U-TgTzFdPZSYSeaGnRmxDA__Q3haAJBOamrR7OSXNXQk3qnqEQGJ7_GDpbAk1SxIXrrYPN2yjnjUVB3BYhNIPjKFozWsiavKRr7fiNhF7nsyDIQzYNE9K1repNx879MKeBaK5WiFfrGXpoiDchQK6eFqJs2I5NuZXd" />
- </picture>
-</a>
 
 ## Requirements
 
