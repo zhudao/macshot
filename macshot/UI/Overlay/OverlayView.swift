@@ -199,6 +199,15 @@ class OverlayView: NSView {
     private var doubleClickUndoBaseline: Int?
     /// Short-lived marker for the Text tool case where the first click opens an empty editor.
     private var textToolDoubleClickCopyDeadline: TimeInterval = 0
+    /// Second click of a possible double-click-to-copy, decided on mouse-up:
+    /// with trackpad tap-to-click, dragging starts with a double tap, so a
+    /// drag that begins with clickCount 2 is still a drag (#467).
+    private var pendingDoubleClickCopy: (event: NSEvent, point: NSPoint)?
+    /// Timestamp of the last mouse-up (selection, annotation or move drag).
+    private var lastMouseUpAt: TimeInterval = -.infinity
+    /// Some apps post ⌘C right after any mouse drag to "copy the selection".
+    /// A person can't release the mouse and press ⌘C this fast (#477).
+    static let injectedCopyWindow: TimeInterval = 0.25
 
     // Annotations
     var annotations: [Annotation] = [] {
@@ -673,6 +682,18 @@ class OverlayView: NSView {
 
     var isTranslating: Bool = false
     var translateEnabled: Bool = false
+
+    /// Set while OCR runs on the selection. Shows a spinner over the selection
+    /// and holds every input except Escape, so a click, double-click or Return
+    /// can't turn the OCR capture into an ordinary screenshot while Vision works.
+    var isRecognizingText: Bool = false {
+        didSet {
+            guard isRecognizingText != oldValue else { return }
+            if isRecognizingText { showToolbars = false }
+            updateRecognitionIndicator()
+        }
+    }
+    private var recognitionIndicator: NSView?
 
     // Crop tool state
     private var isCropDragging: Bool = false
@@ -1526,6 +1547,10 @@ class OverlayView: NSView {
     // MARK: - Hit Testing
 
     override func hitTest(_ point: NSPoint) -> NSView? {
+        // While OCR runs, no subview (toolbar, resolution box) takes a click.
+        if isRecognizingText {
+            return frame.contains(point) ? self : nil
+        }
         // Let real NSView subviews (toolbar strips, options row) handle their own events.
         // This prevents our mouseDown override from intercepting slider drags etc.
         // In editor mode the strips live in chromeParentView (a sibling container), not in
@@ -5594,6 +5619,10 @@ class OverlayView: NSView {
     // MARK: - Mouse Events
 
     override func mouseDown(with event: NSEvent) {
+        if isRecognizingText { return }
+        // A second click whose mouse-up never arrived (window ordered out
+        // mid-press) must not turn the next press into a copy.
+        pendingDoubleClickCopy = nil
         let point = convert(event.locationInWindow, from: nil)
         justDismissedTextEditor = false  // reset per click; set below if we commit one
 
@@ -5841,7 +5870,12 @@ class OverlayView: NSView {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        if isRecognizingText { return }
         let point = convert(event.locationInWindow, from: nil)
+        if let pending = pendingDoubleClickCopy {
+            guard hypot(point.x - pending.point.x, point.y - pending.point.y) > 3 else { return }
+            convertPendingDoubleClickToDrag(pending)
+        }
 
         // Cancel long-press timer if the user moved more than 3px (they're drawing, not selecting)
         if longPressTimer != nil {
@@ -6495,6 +6529,13 @@ class OverlayView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        if isRecognizingText { return }
+        lastMouseUpAt = event.timestamp
+        if pendingDoubleClickCopy != nil {
+            pendingDoubleClickCopy = nil
+            completeDoubleClickCopy()
+            return
+        }
         spaceRepositioning = false
 
         // Any drag that used boundary snap is ending — clear its guide lines.
@@ -6687,19 +6728,10 @@ class OverlayView: NSView {
                 overlayDelegate?.overlayViewDidConfirm()
                 return true
             }
-            // Cancel any in-progress annotation from this second click.
+            // Cancel any in-progress annotation from this second click, and
+            // copy on mouse-up unless the pointer moves first (a drag).
             currentAnnotation = nil
-            // Rewind the undo stack to the baseline captured on the first click,
-            // popping the annotation(s) the first click finished.
-            if let baseline = doubleClickUndoBaseline {
-                while undoStack.count > baseline { undo() }
-            }
-            doubleClickUndoBaseline = nil
-            textToolDoubleClickCopyDeadline = 0
-            // Clear caches so the confirm renders without the popped annotations.
-            cachedCompositedImage = nil
-            cachedAnnotationLayer = nil
-            overlayDelegate?.overlayViewDidConfirm()
+            pendingDoubleClickCopy = (event, point)
             return true
         }
 
@@ -6721,6 +6753,35 @@ class OverlayView: NSView {
             textToolDoubleClickCopyDeadline = 0
         }
         return false
+    }
+
+    /// The second click ended without moving: rewind what the first click
+    /// drew and copy.
+    private func completeDoubleClickCopy() {
+        // Rewind the undo stack to the baseline captured on the first click,
+        // popping the annotation(s) the first click finished.
+        if let baseline = doubleClickUndoBaseline {
+            while undoStack.count > baseline { undo() }
+        }
+        doubleClickUndoBaseline = nil
+        textToolDoubleClickCopyDeadline = 0
+        // Clear caches so the confirm renders without the popped annotations.
+        cachedCompositedImage = nil
+        cachedAnnotationLayer = nil
+        overlayDelegate?.overlayViewDidConfirm()
+    }
+
+    /// The second click moved: replay it as an ordinary single click so the
+    /// current tool starts drawing at the press point.
+    private func convertPendingDoubleClickToDrag(_ pending: (event: NSEvent, point: NSPoint)) {
+        pendingDoubleClickCopy = nil
+        textToolDoubleClickCopyDeadline = 0
+        let down = pending.event
+        guard let single = NSEvent.mouseEvent(
+            with: .leftMouseDown, location: down.locationInWindow, modifierFlags: down.modifierFlags,
+            timestamp: down.timestamp, windowNumber: down.windowNumber, context: nil,
+            eventNumber: down.eventNumber, clickCount: 1, pressure: down.pressure) else { return }
+        mouseDown(with: single)
     }
 
     private var isDoubleClickToCopyEnabled: Bool {
@@ -6748,7 +6809,7 @@ class OverlayView: NSView {
             // Real drag — use drawn rect as-is
             state = .selected
             applyPreSelectionLockAfterSelection()
-            if !autoOCRMode && !autoQuickSaveMode && !autoScrollCaptureMode && !autoConfirmMode { showToolbars = true }
+            if !hasPendingSelectionAction { showToolbars = true }
             overlayDelegate?.overlayViewDidFinishSelection(selectionRect)
         } else if snapMode != .off, let snapRect = hoveredSnapRect, !snapRect.isEmpty {
             // Click (no drag) with snap on — select the hovered target.
@@ -6768,13 +6829,13 @@ class OverlayView: NSView {
                 }
             }
             state = .selected
-            if !autoOCRMode && !autoQuickSaveMode && !autoScrollCaptureMode && !autoConfirmMode { showToolbars = true }
+            if !hasPendingSelectionAction { showToolbars = true }
             overlayDelegate?.overlayViewDidFinishSelection(selectionRect)
         } else {
             // Click (no drag), snap off — expand to full screen
             selectionRect = bounds
             state = .selected
-            if !autoOCRMode && !autoQuickSaveMode && !autoScrollCaptureMode && !autoConfirmMode { showToolbars = true }
+            if !hasPendingSelectionAction { showToolbars = true }
             overlayDelegate?.overlayViewDidFinishSelection(selectionRect)
         }
         hoveredSnapRect = nil
@@ -6783,6 +6844,20 @@ class OverlayView: NSView {
             let point = convert(win.mouseLocationOutsideOfEventStream, from: nil)
             updateCursorForPoint(point)
         }
+        runPendingSelectionActions()
+        needsDisplay = true
+    }
+
+    /// True while the capture entry point (OCR, Quick Capture, Scroll Capture,
+    /// Add Capture) will act on the selection itself, so the toolbars stay hidden.
+    private var hasPendingSelectionAction: Bool {
+        autoOCRMode || autoQuickSaveMode || autoScrollCaptureMode || autoConfirmMode
+    }
+
+    /// Run the one-shot action the capture entry point asked for. Every way of
+    /// completing a selection (drag, click, right-click anchor, F, R) must call
+    /// this, or e.g. Capture OCR leaves a selection with no toolbar and no OCR.
+    private func runPendingSelectionActions() {
         // Auto-enter recording mode if triggered from "Record Screen"
         if autoEnterRecordingMode {
             autoEnterRecordingMode = false
@@ -6820,7 +6895,35 @@ class OverlayView: NSView {
             autoConfirmMode = false
             overlayDelegate?.overlayViewDidConfirm()
         }
-        needsDisplay = true
+    }
+
+    /// Spinner centered on the selection while `isRecognizingText` is set.
+    private func updateRecognitionIndicator() {
+        guard isRecognizingText else {
+            recognitionIndicator?.removeFromSuperview()
+            recognitionIndicator = nil
+            return
+        }
+        let side: CGFloat = 56
+        let container = recognitionIndicator ?? {
+            let view = NSView(frame: NSRect(x: 0, y: 0, width: side, height: side))
+            view.wantsLayer = true
+            view.layer?.backgroundColor = NSColor(white: 0.1, alpha: 0.85).cgColor
+            view.layer?.cornerRadius = 12
+            view.appearance = NSAppearance(named: .darkAqua)
+            let spinner = NSProgressIndicator(frame: NSRect(x: 12, y: 12, width: 32, height: 32))
+            spinner.style = .spinning
+            spinner.controlSize = .regular
+            spinner.isIndeterminate = true
+            spinner.startAnimation(nil)
+            view.addSubview(spinner)
+            addSubview(view)
+            recognitionIndicator = view
+            return view
+        }()
+        let area = selectionRect.width >= side && selectionRect.height >= side ? selectionRect : bounds
+        container.setFrameOrigin(NSPoint(x: (area.midX - side / 2).rounded(),
+                                         y: (area.midY - side / 2).rounded()))
     }
 
     private func applyPreSelectionLockAfterSelection() {
@@ -6935,9 +7038,7 @@ class OverlayView: NSView {
         if selectionRect.width > 5 || selectionRect.height > 5 {
             state = .selected
             applyPreSelectionLockAfterSelection()
-            if !autoOCRMode && !autoQuickSaveMode && !autoScrollCaptureMode && !autoConfirmMode {
-                showToolbars = true
-            }
+            if !hasPendingSelectionAction { showToolbars = true }
             overlayDelegate?.overlayViewDidFinishSelection(selectionRect)
         } else if snapMode != .off, let snapRect = hoveredSnapRect, !snapRect.isEmpty {
             selectionRect = snapRect
@@ -6956,22 +7057,19 @@ class OverlayView: NSView {
                 }
             }
             state = .selected
-            if !autoOCRMode && !autoQuickSaveMode && !autoScrollCaptureMode && !autoConfirmMode {
-                showToolbars = true
-            }
+            if !hasPendingSelectionAction { showToolbars = true }
             overlayDelegate?.overlayViewDidFinishSelection(selectionRect)
         } else {
             selectionRect = bounds
             state = .selected
-            if !autoOCRMode && !autoQuickSaveMode && !autoScrollCaptureMode && !autoConfirmMode {
-                showToolbars = true
-            }
+            if !hasPendingSelectionAction { showToolbars = true }
             overlayDelegate?.overlayViewDidFinishSelection(selectionRect)
         }
         hoveredSnapRect = nil
         if let win = window {
             updateCursorForPoint(convert(win.mouseLocationOutsideOfEventStream, from: nil))
         }
+        runPendingSelectionActions()
         needsDisplay = true
     }
 
@@ -6987,6 +7085,7 @@ class OverlayView: NSView {
     }
 
     override func rightMouseDown(with event: NSEvent) {
+        if isRecognizingText { return }
         let point = convert(event.locationInWindow, from: nil)
 
         // Text Fill/Outline color picking handled by ToolOptionsRowView
@@ -7061,6 +7160,7 @@ class OverlayView: NSView {
     }
 
     override func rightMouseDragged(with event: NSEvent) {
+        if isRecognizingText { return }
         if colorWheel.isVisible {
             let point = convert(event.locationInWindow, from: nil)
             colorWheel.updateHover(at: point)
@@ -7070,6 +7170,7 @@ class OverlayView: NSView {
     }
 
     override func rightMouseUp(with event: NSEvent) {
+        if isRecognizingText { return }
         if colorWheel.isVisible && !colorWheel.isSticky {
             if colorWheel.hoveredColor != nil {
                 // User dragged to a color — pick it and dismiss
@@ -9085,6 +9186,7 @@ class OverlayView: NSView {
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if isRecognizingText { return true }
         // Text editing: forward standard commands to the active text view.
         if let tv = textEditView {
             if let action = EditorCommandShortcutManager.action(for: event) {
@@ -9138,6 +9240,8 @@ class OverlayView: NSView {
             if KeyboardShortcutMatcher.matches(event, character: "c", modifiers: .command) {
                 if !selectedAnnotations.isEmpty {
                     copySelectedAnnotations()
+                } else if event.timestamp - lastMouseUpAt < Self.injectedCopyWindow {
+                    // Another app's synthetic ⌘C right after a drag: swallow it.
                 } else {
                     overlayDelegate?.overlayViewDidConfirm()
                 }
@@ -9164,6 +9268,12 @@ class OverlayView: NSView {
     }
 
     override func keyDown(with event: NSEvent) {
+        if isRecognizingText {
+            if event.keyCode == 53 {  // Escape abandons the OCR run
+                overlayDelegate?.overlayViewDidCancel()
+            }
+            return
+        }
         // Recording setup allows Move and Escape, without activating screenshot
         // tools or output shortcuts. The actual recording uses a separate HUD.
         if isRecording {
@@ -9183,14 +9293,10 @@ class OverlayView: NSView {
             selectionRect = bounds
             state = .selected
             hoveredSnapRect = nil
-            if autoQuickSaveMode {
-                autoQuickSaveMode = false
-                overlayDelegate?.overlayViewDidRequestQuickSave()
-            } else {
-                showToolbars = true
-                overlayDelegate?.overlayViewDidFinishSelection(selectionRect)
-                needsDisplay = true
-            }
+            if !hasPendingSelectionAction { showToolbars = true }
+            overlayDelegate?.overlayViewDidFinishSelection(selectionRect)
+            runPendingSelectionActions()
+            needsDisplay = true
             return
         }
 
@@ -9961,7 +10067,8 @@ class OverlayView: NSView {
         selectionRect = rect
         selectionStart = rect.origin
         state = .selected
-        showToolbars = true
+        if !hasPendingSelectionAction { showToolbars = true }
+        runPendingSelectionActions()
         needsDisplay = true
     }
 
@@ -10246,6 +10353,9 @@ class OverlayView: NSView {
         autoQuickSaveMode = false
         autoScrollCaptureMode = false
         autoConfirmMode = false
+        isRecognizingText = false
+        pendingDoubleClickCopy = nil
+        lastMouseUpAt = -.infinity
         needsDisplay = true
     }
 }

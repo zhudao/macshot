@@ -6,9 +6,26 @@
 
 - Move and resize the webcam during recording, with optional corner snapping. Studio replays recorded placement changes. Thanks @ivanilsonsousa. (#429)
 - Record GIF menu item and configurable hotkey, plus Save + copy to clipboard when a recording stops. Thanks @mdtoupin. (#423)
+- macshot appears in Finder's "Open With" menu for MP4, MOV and M4V videos, which open in the video editor. (#461)
+
+### Changed
+
+- Pressing the Record Area or Record GIF hotkey again stops the recording.
+- Record GIF opens the take in the video editor with GIF already selected as the export format, when the recording destination is "Open editor".
+- The webcam bubble takes clicks while recording so it can be moved and resized. Clicks and scrolling over the bubble no longer reach the app underneath.
 
 ### Fixed
 
+- **Chinese, Japanese and other non-Latin text** on lines that also contain English came out garbled in OCR, e.g. "174531 Privacy & Security". Text recognition now uses your system languages ahead of English. (#462)
+- **macshot was missing from the Screen Recording list on first launch**: macOS lists an app only after it asks for access, and the permission window never asked. "Open System Settings" now asks first, so macshot is in the list ready to switch on. (#299)
+- **Scroll capture on modern pages**: stitching no longer breaks on translucent navbars (their blur changes as content passes under them), pages where only a center column scrolls between fixed sidebars (x.com), fixed gradient backgrounds, cookie banners and floating boxes pinned to the bottom, or lists of near-identical rows. Navbars, sidebars and banners now appear once instead of being repeated down the image, and a mismatched frame no longer drops the rest of the page.
+- **Scroll capture with a mouse wheel**: a wheel moves the page in large animated steps between scroll events, which outran the capture and lost content. Frames are now taken continuously while the page moves. (#484)
+- **Drawing with a trackpad double-tap drag copied the capture**: with "tap to click", a drag starts with a double tap, which double-click-to-copy treated as a copy. Every annotation drawn that way copied the image and added a floating thumbnail, and the annotation itself was lost. A double-click inside the selection now copies only when the second click doesn't move. (#467)
+- **Captures confirmed by themselves right after selecting or drawing**: some apps send ⌘C after any mouse drag to copy selected text, and macshot treated it as Copy. A ⌘C within a quarter second of releasing the mouse is now ignored. (#477)
+- **Each screenshot showed up twice in clipboard managers** (Maccy, Raycast, Paste): one Copy changed the clipboard twice. It now changes it once. (#483)
+- **Global hotkeys that silently did nothing**: two actions could share a shortcut, and the second never fired. Setting a shortcut now takes it away from the action that had it, and existing duplicates are cleared. Thanks @zkmn73. (#445, #446)
+- **Recording filenames now match the Settings preview**: `{app}` names every take, and "Show in Finder" files recordings into the template's folders like Save + copy does.
+- **Capture OCR did nothing with some ways of selecting**: right-click selection, F (full screen) and R (last area) ignored OCR mode. Every way of selecting now runs it, a spinner shows while text is recognized, and Escape cancels. Thanks @a1exsun. (#440, #302)
 - Exported audio plays in FFmpeg-based players and services by keeping its sample-rate clock. Thanks @Redth. (#449)
 - Small silence buffers advance a silent system track when it holds up microphone encoding. Queued audio still drains at stop, and persistent overload remains an explicit failure. Based on the investigation in #456.
 - Webcam resizing preserves the initial grab offset and opposite corner. Cancelled GIF requests do not affect later captures, and Save + copy also copies after choosing a destination in the Save dialog.
