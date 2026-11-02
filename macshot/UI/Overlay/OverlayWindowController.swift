@@ -88,6 +88,9 @@ protocol OverlayWindowControllerDelegate: AnyObject {
 
 extension OverlayWindowControllerDelegate {
     func overlayDidRequestRestoreLastSelection(_ controller: OverlayWindowController) {}
+    func overlayDidRequestCopyScrollCapture(_ controller: OverlayWindowController) {
+        overlayDidRequestStopScrollCapture(controller)
+    }
 }
 
 /// Manages one fullscreen overlay per screen.
@@ -487,8 +490,7 @@ class OverlayWindowController {
     private func playCopySound() {
         let soundEnabled = UserDefaults.standard.object(forKey: "playCopySound") as? Bool ?? true
         guard soundEnabled else { return }
-        AppDelegate.captureSound?.stop()
-        AppDelegate.captureSound?.play()
+        CaptureSound.shared.play()
     }
 
     private func captureRegion() -> NSImage? {
@@ -800,6 +802,10 @@ extension OverlayWindowController: OverlayViewDelegate {
 
     func overlayViewDidRequestStopScrollCapture() {
         overlayDelegate?.overlayDidRequestStopScrollCapture(self)
+    }
+
+    func overlayViewDidRequestCopyScrollCapture() {
+        overlayDelegate?.overlayDidRequestCopyScrollCapture(self)
     }
 
     func overlayViewDidRequestCancelScrollCapture() {

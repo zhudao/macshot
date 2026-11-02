@@ -514,6 +514,7 @@
 "Settings" = "Configurações";
 "macshot Settings" = "Configurações do macshot";
 "Also open in Editor" = "Abrir também no Editor";
+"Open in Editor right after selection" = "Abrir no Editor logo após a seleção";
 "Close editor after copying" = "Fechar o editor após copiar";
 "Hide controls" = "Ocultar controles";
 "Hide recording controls" = "Ocultar controles de gravação";
@@ -859,3 +860,4 @@
 "Sway" = "Balanço";
 
 "Snap webcam to corners when moved" = "Encaixar a webcam nos cantos ao mover";
+"Search emoji" = "Buscar emoji";

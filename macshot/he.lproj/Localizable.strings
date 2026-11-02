@@ -515,6 +515,7 @@
 "Settings..." = "הגדרות...";
 "macshot Settings" = "הגדרות macshot";
 "Also open in Editor" = "פתח גם בעורך";
+"Open in Editor right after selection" = "פתח בעורך מיד לאחר הבחירה";
 "Close editor after copying" = "סגור את העורך לאחר ההעתקה";
 "Hide controls" = "הסתר פקדים";
 "Hide recording controls" = "הסתר פקדי הקלטה";
@@ -859,3 +860,4 @@
 "Sway" = "נטייה";
 
 "Snap webcam to corners when moved" = "הצמדת מצלמת הרשת לפינות בעת הזזה";
+"Search emoji" = "חיפוש אמוג׳י";

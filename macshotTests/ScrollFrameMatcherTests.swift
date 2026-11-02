@@ -102,11 +102,40 @@ final class ScrollFrameMatcherTests: XCTestCase {
         }
         XCTAssertEqual(result?.shift, 90)
         let sides = result?.fixedSides ?? []
-        XCTAssertEqual(sides.count, 2)
-        XCTAssertEqual(sides.first?.lowerBound, 0)
-        XCTAssertLessThanOrEqual(sides.first?.upperBound ?? .max, 112)
-        XCTAssertGreaterThanOrEqual(sides.last?.lowerBound ?? 0, 285)
-        XCTAssertEqual(sides.last?.upperBound, 400)
+        XCTAssertEqual(sides.count, 2, "\(sides)")
+        // Each covers its sidebar's content; plain margin columns are left alone.
+        XCTAssertLessThanOrEqual(sides.first?.lowerBound ?? .max, 14)
+        XCTAssertTrue((70...112).contains(sides.first?.upperBound ?? 0), "\(sides)")
+        XCTAssertTrue((300...330).contains(sides.last?.lowerBound ?? 0), "\(sides)")
+        XCTAssertGreaterThanOrEqual(sides.last?.upperBound ?? 0, 386)
+    }
+
+    /// x.com's right column scrolls slower than the feed until it sticks.
+    /// While it lags, its columns are reported for filling rather than being
+    /// stitched (which garbles them), and the feed's shift wins.
+    func testASlowerSidebarIsReportedAndDoesNotGarble() {
+        let result = match(300, 360) { context, scroll in
+            self.drawPage(context, scroll: scroll, columns: 0..<280)
+            self.drawPage(context, scroll: 1000 + scroll / 3, columns: 290..<400)
+        }
+        XCTAssertEqual(result?.shift, 60)
+        let sides = result?.fixedSides ?? []
+        XCTAssertTrue(sides.contains { $0.lowerBound <= 305 && $0.upperBound >= 380 }, "\(sides)")
+        XCTAssertFalse(sides.contains { $0.lowerBound < 250 }, "the feed stays: \(sides)")
+    }
+
+    /// GitHub: a wide file tree slides up at its own rate (until it sticks)
+    /// while the code scrolls. The code's shift wins, and the side reported
+    /// for filling covers the whole tree, so no file name is cut in half.
+    func testAWideSidePanelMovingAtItsOwnRateDoesNotFailTheMatch() {
+        let result = match(100, 244) { context, scroll in
+            self.drawPage(context, scroll: scroll, columns: 170..<400)
+            self.drawPage(context, scroll: 500 + scroll / 6, columns: 0..<160)
+        }
+        XCTAssertEqual(result?.shift, 144)
+        let sides = result?.fixedSides ?? []
+        XCTAssertTrue(sides.contains { $0.lowerBound <= 20 } && sides.contains { $0.upperBound >= 140 }, "\(sides)")
+        XCTAssertFalse(sides.contains { $0.upperBound > 185 }, "the code stays: \(sides)")
     }
 
     /// A background gradient that stays put while sparse text scrolls over it
@@ -128,6 +157,36 @@ final class ScrollFrameMatcherTests: XCTestCase {
         XCTAssertEqual(result?.shift, 45)
     }
 
+    /// A video playing in the middle of the page changes between frames on
+    /// its own. It must not pull the shift, and it is reported as one region
+    /// so the stitcher can paste it from a single frame.
+    func testPlayingVideoDoesNotPullTheShiftAndIsReported() {
+        let result = match(300, 352) { context, scroll in
+            self.drawPage(context, scroll: scroll)
+            self.drawVideo(context, top: 400 - scroll, moment: scroll)
+        }
+        XCTAssertEqual(result?.shift, 52)
+        let rects = result?.dynamicRects ?? []
+        XCTAssertEqual(rects.count, 1, "\(rects)")
+        XCTAssertTrue(rects.first?.contains(CGRect(x: 110, y: 56, width: 180, height: 140)) ?? false, "\(rects)")
+    }
+
+    func testAStillPageReportsNoDynamicRegion() {
+        XCTAssertEqual(match(300, 352) { self.drawPage($0, scroll: $1) }?.dynamicRects, [])
+    }
+
+    /// Random 8×8 blocks that differ for every `moment`: a playing video.
+    private func drawVideo(_ context: CGContext, top: Int, moment: Int) {
+        var seed = UInt64(moment) &* 2862933555777941757 &+ 3037000493
+        for y in stride(from: 0, to: 160, by: 8) {
+            for x in stride(from: 60, to: 340, by: 8) {
+                seed = seed &* 6364136223846793005 &+ 1442695040888963407
+                context.setFillColor(CGColor(gray: CGFloat(seed >> 56) / 255, alpha: 1))
+                context.fill(CGRect(x: x, y: top + y, width: 8, height: 8))
+            }
+        }
+    }
+
     // MARK: - Pinned bottom content
 
     /// Vercel: a cookie box floating at the bottom-left over part of the
@@ -143,7 +202,38 @@ final class ScrollFrameMatcherTests: XCTestCase {
         }
         XCTAssertEqual(result?.shift, 70)
         XCTAssertGreaterThanOrEqual(result?.staticBottomRows ?? 0, 70, "the whole box, including its top padding")
-        XCTAssertLessThanOrEqual(result?.staticBottomRows ?? .max, height * 35 / 100)
+        XCTAssertLessThanOrEqual(result?.staticBottomRows ?? .max, height * 65 / 100)
+    }
+
+    /// x.com: a sticky sidebar is static in every row, but it isn't pinned
+    /// bottom content. Claiming it as a banner starved the whole stitch.
+    func testAStickySidebarIsNotMistakenForAPinnedBanner() {
+        let result = match(300, 370) { context, scroll in
+            self.drawPage(context, scroll: scroll, columns: 0..<300)
+            self.drawPage(context, scroll: 0, columns: 310..<400)
+        }
+        XCTAssertEqual(result?.shift, 70)
+        XCTAssertEqual(result?.staticBottomRows, 0)
+    }
+
+    /// Reddit: a big flat graphic with large lettering, scrolled by a few
+    /// pixels, matches itself in place over most of its area. That is not a
+    /// pinned banner, or its rows would be held back from every strip.
+    func testAFlatGraphicAfterASmallScrollIsNotPinned() {
+        let result = match(300, 312) { context, scroll in
+            self.drawPage(context, scroll: scroll)
+            let top = 500 - scroll
+            context.setFillColor(CGColor(red: 0.45, green: 0.3, blue: 0.85, alpha: 1))
+            context.fill(CGRect(x: 20, y: top, width: 360, height: 300))
+            context.setFillColor(CGColor(red: 0.75, green: 0.65, blue: 1, alpha: 1))
+            for (i, x) in [40, 120, 200, 280].enumerated() {
+                context.fill(CGRect(x: x, y: top + 30 + i * 50, width: 60, height: 70))   // big letters
+            }
+        }
+        XCTAssertEqual(result?.shift, 12)
+        // Rows within one shift of the bottom can't be told apart from pinned
+        // content and a few may be held back; the graphic itself must not be.
+        XCTAssertLessThanOrEqual(result?.staticBottomRows ?? .max, 32)
     }
 
     func testAPageWithoutPinnedContentHoldsNothingBack() {

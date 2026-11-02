@@ -524,6 +524,7 @@
 "Settings..." = "அமைப்புகள்...";
 "macshot Settings" = "macshot அமைப்புகள்";
 "Also open in Editor" = "எடிட்டரிலும் திற";
+"Open in Editor right after selection" = "தேர்வு செய்தவுடன் எடிட்டரில் திற";
 "Close editor after copying" = "நகலெடுத்த பிறகு எடிட்டரை மூடு";
 "Hide controls" = "கட்டுப்பாடுகளை மறை";
 "Hide recording controls" = "பதிவு கட்டுப்பாடுகளை மறை";
@@ -859,3 +860,4 @@
 "Sway" = "அசைவு";
 
 "Snap webcam to corners when moved" = "நகர்த்தும்போது வெப்கேமைக் மூலைகளில் பொருத்து";
+"Search emoji" = "எமோஜியைத் தேடு";

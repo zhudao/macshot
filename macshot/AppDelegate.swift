@@ -228,6 +228,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     private var selectionBorderOverlay: SelectionBorderOverlay?
     private var menuBarIconWasHidden: Bool = false  // restore after recording if user had it hidden
     private var scrollCaptureController: ScrollCaptureController?
+    /// Set when the session is stopped with ⌘C: copy the result whatever the mode.
+    private var scrollCaptureCopyRequested = false
     /// The overlay controller whose selection is being scroll-captured.
     private var scrollCaptureOverlayController: OverlayWindowController?
     private var scrollCapturePreviewPanel: ScrollCapturePreviewPanel?
@@ -251,12 +253,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     /// `.userInitiated` creates a `PreventUserIdleSystemSleep` assertion and
     /// keeps Macs awake indefinitely.
     private var appNapAssertion: NSObjectProtocol?
-
-    /// Shared capture sound — loaded once, reused everywhere.
-    static let captureSound: NSSound? = {
-        let path = "/System/Library/Components/CoreAudio.component/Contents/SharedSupport/SystemSounds/system/Screen Capture.aif"
-        return NSSound(contentsOfFile: path, byReference: true) ?? NSSound(named: "Tink")
-    }()
 
     func applicationDidFinishLaunching(_ aNotification: Notification) {
         // Prevent multiple instances — if already running, activate the existing one and quit
@@ -331,13 +327,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             setMenuBarIconVisible(false)
         }
         registerHotkey()
-        // Pre-warm CoreAudio so the first capture sound doesn't stall ~1s.
-        if let sound = Self.captureSound {
-            sound.volume = 0
-            sound.play()
-            sound.stop()
-            sound.volume = 1
-        }
+        // Load the capture sound ahead of the first capture, off the main thread.
+        CaptureSound.shared.warmUp()
 
         // Listen for duplicate-launch notification to restore icon
         DistributedNotificationCenter.default().addObserver(
@@ -822,6 +813,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         // Capture Delay submenu
         let delayItem = NSMenuItem(title: L("Capture Delay"), action: nil, keyEquivalent: "")
         delayItem.image = NSImage(systemSymbolName: "timer", accessibilityDescription: nil)
+        delayItem.keepImageVisible()
         let delaySubmenu = NSMenu()
         delaySubmenu.autoenablesItems = false
         let currentDelay = UserDefaults.standard.integer(forKey: "captureDelaySeconds")
@@ -841,18 +833,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         let recordAreaItem = NSMenuItem(title: L("Record Area"), action: #selector(recordArea), keyEquivalent: "")
         recordAreaItem.target = self
         recordAreaItem.image = NSImage(systemSymbolName: "record.circle", accessibilityDescription: nil)
+        recordAreaItem.keepImageVisible()
         HotkeyManager.applyMenuShortcut(for: .recordArea, to: recordAreaItem)
         menu.addItem(recordAreaItem)
 
         let recordGIFItem = NSMenuItem(title: "\(L("Record")) \(L("GIF"))", action: #selector(recordGIF), keyEquivalent: "")
         recordGIFItem.target = self
         recordGIFItem.image = NSImage(systemSymbolName: "photo.stack", accessibilityDescription: nil)
+        recordGIFItem.keepImageVisible()
         HotkeyManager.applyMenuShortcut(for: .recordGIF, to: recordGIFItem)
         menu.addItem(recordGIFItem)
 
         let recordScreenItem = NSMenuItem(title: L("Record Screen"), action: #selector(recordFullScreen), keyEquivalent: "")
         recordScreenItem.target = self
         recordScreenItem.image = NSImage(systemSymbolName: "menubar.dock.rectangle", accessibilityDescription: nil)
+        recordScreenItem.keepImageVisible()
         HotkeyManager.applyMenuShortcut(for: .recordScreen, to: recordScreenItem)
         menu.addItem(recordScreenItem)
 
@@ -945,6 +940,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         let item = NSMenuItem(title: itemID.title, action: action, keyEquivalent: "")
         item.target = self
         item.image = NSImage(systemSymbolName: itemID.symbolName, accessibilityDescription: nil)
+        item.keepImageVisible()
         HotkeyManager.applyMenuShortcut(for: itemID.hotkeySlot, to: item)
         return item
     }
@@ -2119,8 +2115,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     private func playCopySound() {
         let soundEnabled = UserDefaults.standard.object(forKey: "playCopySound") as? Bool ?? true
         guard soundEnabled else { return }
-        Self.captureSound?.stop()
-        Self.captureSound?.play()
+        CaptureSound.shared.play()
     }
 
     func runOCR(on image: NSImage) {
@@ -3306,6 +3301,7 @@ extension AppDelegate: OverlayWindowControllerDelegate {
 
         scrollCaptureOverlayController = controller
 
+        scrollCaptureCopyRequested = false
         let scc = ScrollCaptureController(captureRect: rect, screen: screen)
         scc.excludedWindowIDs = overlayControllers.map { $0.windowNumber }
         scrollCaptureController = scc
@@ -3348,6 +3344,12 @@ extension AppDelegate: OverlayWindowControllerDelegate {
     func overlayDidRequestStopScrollCapture(_ controller: OverlayWindowController) {
         scrollCaptureController?.stopSession()
         // onSessionDone fires asynchronously via handleScrollCaptureCompleted
+    }
+
+    func overlayDidRequestCopyScrollCapture(_ controller: OverlayWindowController) {
+        guard scrollCaptureController != nil else { return }
+        scrollCaptureCopyRequested = true
+        scrollCaptureController?.stopSession()
     }
 
     func overlayDidRequestCancelScrollCapture(_ controller: OverlayWindowController) {
@@ -3535,18 +3537,20 @@ extension AppDelegate: OverlayWindowControllerDelegate {
         scrollCaptureOverlayController?.setScrollCaptureState(isActive: false)
         scrollCaptureOverlayController = nil
         scrollCaptureController = nil
+        let copyRequested = scrollCaptureCopyRequested
+        scrollCaptureCopyRequested = false
 
         dismissOverlays()
 
         guard let image = finalImage else { return }
 
         let entryID = ScreenshotHistory.shared.add(image: image)
-        let mode = QuickCaptureMode.current
-        if mode.shouldCopyImage {
+        let delivery = QuickCaptureMode.current.scrollCaptureDelivery(copyRequested: copyRequested)
+        if delivery.copyImage {
             ImageEncoder.copyToClipboard(image)
         }
-        if mode.shouldSave {
-            saveImageToConfiguredFolder(image, copyPathToClipboard: mode.copyPathOverride)
+        if delivery.save {
+            saveImageToConfiguredFolder(image, copyPathToClipboard: delivery.copyPath)
         }
         playCopySound()
         showFloatingThumbnail(image: image)
@@ -3624,8 +3628,7 @@ extension AppDelegate: NSMenuDelegate {
 
         let soundEnabled = UserDefaults.standard.object(forKey: "playCopySound") as? Bool ?? true
         if soundEnabled {
-            Self.captureSound?.stop()
-            Self.captureSound?.play()
+            CaptureSound.shared.play()
         }
     }
 

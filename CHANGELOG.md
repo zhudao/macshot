@@ -1,6 +1,48 @@
 # Changelog
 
-## [Unreleased]
+## [4.4.0] - 2026-11-01
+
+### Before you update
+
+- **macshot has a new developer signature**, so macOS may ask you to allow Screen Recording again (and Accessibility or Input Monitoring if you use them). If macshot looks enabled in System Settings but capture fails, remove it with the minus button (−) and add it back from Applications with the plus button (+). Your settings, history and recordings are kept.
+
+### New
+
+- **Studio, a redesigned video editor**: a sidebar for background, pointer, zoom, keystrokes, camera and captions, a multi-lane timeline with thumbnails, waveform and snapping, undo/redo, and autosaved projects.
+- **Editable pointer and Auto Zoom**: restyle, resize, smooth or hide the cursor and its click effects after recording, and get zooms generated from your clicks and typing that follow the pointer.
+- **Backgrounds and framing** for recordings: gradients, macOS wallpapers, colors or your own image, with padding, rounded corners, shadow and aspect ratio presets.
+- **Webcam as its own track**: move and resize it while recording, and change its shape, size and position afterwards. (#429)
+- **Captions and keystroke labels**, transcribed on your Mac and exportable as SRT.
+- **Record GIF** from the menu or its own hotkey; press a record hotkey again to stop. (#423)
+- **Every emoji in the stamp tool**, with search by name. (#473)
+- **Filename tokens and date folders**: `{app}`, `{yyyy}`, `{MM}`, `{dd}` and more, and a `/` files screenshots into subfolders. (#422)
+- **Press R** on the capture screen to bring back the last area. (#359)
+- Smaller additions: open the Editor right after selecting (#474), copy screenshots in your image format as well as PNG (#373), date folders for S3 uploads (#417), and "Open With" macshot for videos in Finder (#461).
+
+### Improved
+
+- **Much faster capture on multiple displays**: 4.2 s down to 0.2 s on four displays. (#349)
+- **Scroll capture rebuilt**: translucent navbars, sticky sidebars, cookie banners and pinned boxes appear once instead of repeating, videos stay whole, mouse wheels no longer lose content, and ⌘C or Return finishes the capture. (#484, #437)
+- **macOS 27**: OCR no longer hangs, and the capture and record menu items keep their icons. (#439, #313)
+- Exported MP4s start playing before they have fully downloaded, and recordings play in Telegram and FFmpeg-based players. (#452, #450, #449)
+- The text tool's icon is a plain "T" in every language. (#485)
+
+### Fixed
+
+- Recordings with system audio stopping with "Audio encoding could not keep up". (#444, #453, #455)
+- OCR garbling Chinese, Japanese and other non-Latin text on lines that also contain English. (#462)
+- A trackpad double-tap drag copying the capture instead of drawing. (#467)
+- Captures confirming themselves when another app sent ⌘C after a drag. (#477)
+- Screenshots appearing twice in clipboard managers. (#483)
+- Global hotkeys that silently did nothing when two actions shared a shortcut. (#445)
+- Capture OCR doing nothing after right-click, F or R selection. (#440)
+- macshot missing from the Screen Recording list on first launch. (#299)
+- macshot freezing for seconds when confirming a capture with a slow audio device. (#418)
+- Microphone recordings failing after a restart because a stale default microphone had been saved.
+
+Thanks to @ivanilsonsousa, @mdtoupin, @defia, @mjjjjaazing, @DasCanard, @zkmn73, @a1exsun, @Redth, @ClmntCh7 and @hhktony for their contributions.
+
+## [4.4.0-beta.7] - 2026-11-01
 
 ### Added
 
@@ -19,6 +61,7 @@
 - **Chinese, Japanese and other non-Latin text** on lines that also contain English came out garbled in OCR, e.g. "174531 Privacy & Security". Text recognition now uses your system languages ahead of English. (#462)
 - **macshot was missing from the Screen Recording list on first launch**: macOS lists an app only after it asks for access, and the permission window never asked. "Open System Settings" now asks first, so macshot is in the list ready to switch on. (#299)
 - **Scroll capture on modern pages**: stitching no longer breaks on translucent navbars (their blur changes as content passes under them), pages where only a center column scrolls between fixed sidebars (x.com), fixed gradient backgrounds, cookie banners and floating boxes pinned to the bottom, or lists of near-identical rows. Navbars, sidebars and banners now appear once instead of being repeated down the image, and a mismatched frame no longer drops the rest of the page.
+- **Scroll capture with videos and sticky panels**: playing videos and animations are kept whole instead of being sliced into strips (x.com, YouTube, Reddit). Sidebars that scroll and then stick (x.com's right column, Stack Overflow's), sticky tables of contents (Wikipedia) and side panels that move at their own pace (GitHub's file tree) appear once, cookie panels that slide in late are held back, and the mouse pointer is no longer stamped down the image.
 - **Scroll capture with a mouse wheel**: a wheel moves the page in large animated steps between scroll events, which outran the capture and lost content. Frames are now taken continuously while the page moves. (#484)
 - **Drawing with a trackpad double-tap drag copied the capture**: with "tap to click", a drag starts with a double tap, which double-click-to-copy treated as a copy. Every annotation drawn that way copied the image and added a floating thumbnail, and the annotation itself was lost. A double-click inside the selection now copies only when the second click doesn't move. (#467)
 - **Captures confirmed by themselves right after selecting or drawing**: some apps send ⌘C after any mouse drag to copy selected text, and macshot treated it as Copy. A ⌘C within a quarter second of releasing the mouse is now ignored. (#477)

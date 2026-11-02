@@ -510,6 +510,7 @@
 "Settings..." = "Settings...";
 "macshot Settings" = "macshot Settings";
 "Also open in Editor" = "Also open in Editor";
+"Open in Editor right after selection" = "Open in Editor right after selection";
 "Close editor after copying" = "Close editor after copying";
 "Hide controls" = "Hide controls";
 "Hide recording controls" = "Hide recording controls";
@@ -858,3 +859,4 @@
 "Sway" = "Sway";
 
 "Snap webcam to corners when moved" = "Snap webcam to corners when moved";
+"Search emoji" = "Search emoji";

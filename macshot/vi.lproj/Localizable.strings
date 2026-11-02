@@ -523,6 +523,7 @@
 "Settings..." = "Cài đặt...";
 "macshot Settings" = "Cài đặt macshot";
 "Also open in Editor" = "Đồng thời mở trong trình chỉnh sửa";
+"Open in Editor right after selection" = "Mở trong trình chỉnh sửa ngay sau khi chọn";
 "Close editor after copying" = "Đóng trình chỉnh sửa sau khi sao chép";
 "Hide controls" = "Ẩn điều khiển";
 "Hide recording controls" = "Ẩn điều khiển quay";
@@ -857,3 +858,4 @@
 "Sway" = "Lắc lư";
 
 "Snap webcam to corners when moved" = "Bám webcam vào các góc khi di chuyển";
+"Search emoji" = "Tìm biểu tượng cảm xúc";

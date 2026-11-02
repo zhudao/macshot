@@ -524,6 +524,7 @@
 "Settings..." = "Tetapan...";
 "macshot Settings" = "Tetapan macshot";
 "Also open in Editor" = "Buka juga dalam Editor";
+"Open in Editor right after selection" = "Buka dalam Editor sejurus selepas memilih";
 "Close editor after copying" = "Tutup editor selepas menyalin";
 "Hide controls" = "Sembunyikan kawalan";
 "Hide recording controls" = "Sembunyikan kawalan rakaman";
@@ -859,3 +860,4 @@
 "Sway" = "Hayunan";
 
 "Snap webcam to corners when moved" = "Lekatkan kamera web ke sudut apabila dialihkan";
+"Search emoji" = "Cari emoji";

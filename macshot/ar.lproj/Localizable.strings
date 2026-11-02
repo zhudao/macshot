@@ -516,6 +516,7 @@
 "Settings..." = "الإعدادات...";
 "macshot Settings" = "إعدادات macshot";
 "Also open in Editor" = "فتح في المحرر أيضًا";
+"Open in Editor right after selection" = "فتح في المحرر فور التحديد";
 "Close editor after copying" = "إغلاق المحرر بعد النسخ";
 "Hide controls" = "إخفاء عناصر التحكم";
 "Hide recording controls" = "إخفاء عناصر تحكم التسجيل";
@@ -859,3 +860,4 @@
 "Sway" = "تمايل";
 
 "Snap webcam to corners when moved" = "محاذاة كاميرا الويب إلى الزوايا عند تحريكها";
+"Search emoji" = "ابحث عن رمز تعبيري";
